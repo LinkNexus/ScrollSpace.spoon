@@ -144,6 +144,8 @@ function Workspace.refreshWindows()
     for workspace, _ in pairs(retile_workspaces) do
         Workspace.ScrollSpace:tileWorkspace(workspace)
     end
+
+    state.save()
 end
 
 ---minimize every window (tiled + floating) belonging to a workspace

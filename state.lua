@@ -280,10 +280,20 @@ local function serialize()
 end
 
 local save_timer = nil
+local change_listeners = {}
+
+---register a callback to run after every debounced State.save() write.
+---Lets external consumers (e.g. a sketchybar feed) react to state changes
+---without ScrollSpace needing to know they exist -- keeps the Spoon
+---portable rather than baking in a dependency on any particular consumer.
+---@param fn fun()
+function State.onChange(fn)
+    table.insert(change_listeners, fn)
+end
 
 ---write the current state to State.ScrollSpace.state_file, debounced so a
 ---burst of events (e.g. refreshWindows adding several windows) only
----triggers one disk write
+---triggers one disk write, then notify onChange listeners
 function State.save()
     if save_timer then save_timer:stop() end
     save_timer = Timer.doAfter(1, function()
@@ -300,6 +310,13 @@ function State.save()
         end
         f:write(json)
         f:close()
+
+        for _, fn in ipairs(change_listeners) do
+            local listener_ok, err = pcall(fn)
+            if not listener_ok then
+                State.ScrollSpace.logger.e("onChange listener failed: " .. tostring(err))
+            end
+        end
     end)
 end
 
