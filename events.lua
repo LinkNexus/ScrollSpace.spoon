@@ -27,6 +27,16 @@ local screen_watcher = Screen.watcher.new((function()
     end
 end)())
 
+---safety net for windowDestroyed not firing reliably when an app is
+---killed abruptly (SIGTERM/force-quit/crash) instead of closed normally
+----- prune any tracked windows left dangling once the app is confirmed
+---gone. See State.pruneDead().
+local app_watcher = hs.application.watcher.new(function(_, event)
+    if event == hs.application.watcher.terminated then
+        Events.ScrollSpace.state.pruneDead()
+    end
+end)
+
 ---callback for window events
 ---@param window Window
 ---@param event string name of the event
@@ -119,12 +129,14 @@ function Events.start()
     }, function(window, _, event) Events.windowEventHandler(window, event, Events.ScrollSpace) end)
 
     screen_watcher:start()
+    app_watcher:start()
 end
 
 ---stop monitoring for window events
 function Events.stop()
     Events.ScrollSpace.window_filter:unsubscribeAll()
     Events.ScrollSpace.state.uiWatcherStopAll()
+    app_watcher:stop()
     screen_watcher:stop()
 end
 

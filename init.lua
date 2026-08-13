@@ -81,8 +81,19 @@ ScrollSpace.actions.init(ScrollSpace)
 ---@return ScrollSpace
 function ScrollSpace:start()
     self.state.clear()
-    self.state.load()               -- reconcile persisted layout against windows that still exist
-    self.workspace.refreshWindows() -- pick up anything the loaded snapshot didn't cover
+    self.state.load() -- reconcile persisted layout against windows that still exist
+
+    -- pick up anything the loaded snapshot didn't cover. hs.window.filter's
+    -- own internals can transiently error here (observed live: a
+    -- momentarily-unfetchable NSRunningApplication during getWindows()),
+    -- which must not be allowed to abort events.start() below -- without
+    -- live event tracking nothing else works either, so a partial/failed
+    -- initial catch-up pass is far better than no event system at all
+    local ok, err = pcall(self.workspace.refreshWindows)
+    if not ok then
+        self.logger.e("refreshWindows failed during start(), continuing anyway: " .. tostring(err))
+    end
+
     self.events.start()
     return self
 end

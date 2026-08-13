@@ -131,6 +131,7 @@ end
 ---get all managed windows and retile any workspace that gained one
 function Workspace.refreshWindows()
     local state = Workspace.ScrollSpace.state
+    state.pruneDead()
     local all_windows = Workspace.ScrollSpace.window_filter:getWindows()
 
     local retile_workspaces = {}

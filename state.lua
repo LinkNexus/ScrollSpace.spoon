@@ -188,6 +188,51 @@ function State.allWorkspaces()
     return workspaces
 end
 
+---remove any tracked windows whose underlying OS window no longer
+---exists. windowDestroyed doesn't reliably fire when an app is killed
+---abruptly (SIGTERM/force-quit/crash) rather than closed normally (the
+---AXObserver can be torn down along with the dying process before it
+---gets a chance to deliver the notification) -- this is the safety net
+---for that case, run whenever an app terminates (see events.lua's
+---app_watcher) and at the start of every refreshWindows() call.
+function State.pruneDead()
+    local dead_ids, dead_indices = {}, {}
+    for id, index in pairs(index_table) do
+        if not hs.window.get(id) then
+            table.insert(dead_ids, id)
+            table.insert(dead_indices, index)
+        end
+    end
+
+    -- remove highest row/col first within each workspace so removing
+    -- one entry doesn't shift the row/col index of another pending
+    -- removal in the same column/workspace
+    table.sort(dead_indices, function(a, b)
+        if a.workspace ~= b.workspace then return a.workspace > b.workspace end
+        if a.col ~= b.col then return a.col > b.col end
+        return a.row > b.row
+    end)
+    for _, index in ipairs(dead_indices) do
+        table.remove(State.windowList(index.workspace, index.col), index.row)
+    end
+    for _, id in ipairs(dead_ids) do State.uiWatcherDelete(id) end
+
+    local dead_floating = {}
+    for id, _ in pairs(State.is_floating) do
+        if not hs.window.get(id) then table.insert(dead_floating, id) end
+    end
+    for _, id in ipairs(dead_floating) do
+        State.is_floating[id] = nil
+        State.uiWatcherDelete(id)
+    end
+
+    local pruned = #dead_ids + #dead_floating
+    if pruned > 0 then
+        State.ScrollSpace.logger.d("pruned " .. pruned .. " dead window(s)")
+        State.save()
+    end
+end
+
 ---return internal state for debugging purposes
 function State.get()
     return {
