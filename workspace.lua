@@ -132,11 +132,45 @@ end
 function Workspace.refreshWindows()
     local state = Workspace.ScrollSpace.state
     state.pruneDead()
-    local all_windows = Workspace.ScrollSpace.window_filter:getWindows()
+
+    -- hs.window.allWindows(), not window_filter:getWindows() -- the
+    -- latter only returns currently-visible windows, which would miss
+    -- any minimized-but-untracked window entirely (e.g. one orphaned by
+    -- a past bug, or an app that starts out minimized).
+    local all_windows = hs.window.allWindows()
+
+    -- isWindowAllowed(window) is unreliable on its own -- confirmed live
+    -- (2026-08-14) that it can return false for a window that is visible,
+    -- eligible, and even present in this exact window_filter's own
+    -- getWindows() output moments earlier (a kitty.main window survived a
+    -- theme-change-triggered prune/re-add and came back with a new
+    -- CGWindowID; isWindowAllowed refused to ever let it back into
+    -- tracking, permanently breaking that workspace's tiling until fixed
+    -- by hand). getWindows() membership is the trustworthy signal for any
+    -- currently-visible window since it's the same list events.lua's own
+    -- subscriptions are built from; isWindowAllowed is only trusted as a
+    -- fallback for windows getWindows() can't see at all (minimized ones)
+    -- -- the orphan-recovery case this function exists for in the first
+    -- place.
+    local visible_allowed = {}
+    for _, window in ipairs(Workspace.ScrollSpace.window_filter:getWindows()) do
+        visible_allowed[window:id()] = true
+    end
 
     local retile_workspaces = {}
     for _, window in ipairs(all_windows) do
-        if not Workspace.ScrollSpace.floating.isFloating(window) and not state.windowIndex(window) then
+        -- the scratchpad window is deliberately kept out of index_table
+        -- too (not a workspace member, see scratchpad.lua) -- without
+        -- this check it looks exactly like an untracked window and
+        -- would get pulled back into a workspace's tiling. Pre-existing
+        -- gap, not new: it could already trigger whenever the
+        -- scratchpad window was visible, this change just makes it far
+        -- more likely to hit (minimized scratchpad windows are now in
+        -- scope too via allWindows()).
+        if window:id() ~= state.scratchpad
+            and (visible_allowed[window:id()] or Workspace.ScrollSpace.window_filter:isWindowAllowed(window))
+            and not Workspace.ScrollSpace.floating.isFloating(window)
+            and not state.windowIndex(window) then
             local workspace = Workspace.addWindow(window)
             if workspace then retile_workspaces[workspace] = true end
         end
