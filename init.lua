@@ -94,7 +94,26 @@ function ScrollSpace:start()
         self.logger.e("refreshWindows failed during start(), continuing anyway: " .. tostring(err))
     end
 
-    self.events.start()
+    -- events.start()'s own window_filter:subscribe() call hits the same
+    -- class of transient hs.window.filter internal error (observed live,
+    -- a second, differently-shaped crash from the one above) -- without
+    -- this guard, that error propagates out of ScrollSpace:start()
+    -- entirely, and since Hammerspoon loads the whole init.lua as one
+    -- chunk under a single xpcall, it silently aborts every hotkey
+    -- binding and require() declared after ScrollSpace:start() in the
+    -- parent config too. One retry shortly after: these have all been
+    -- transient races that succeed on a second attempt.
+    local events_ok, events_err = pcall(self.events.start)
+    if not events_ok then
+        self.logger.e("events.start() failed during start(), retrying shortly: " .. tostring(events_err))
+        hs.timer.doAfter(2, function()
+            local retry_ok, retry_err = pcall(self.events.start)
+            if not retry_ok then
+                self.logger.e("events.start() retry also failed: " .. tostring(retry_err))
+            end
+        end)
+    end
+
     return self
 end
 
