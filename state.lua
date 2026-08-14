@@ -383,18 +383,19 @@ function State.load()
         return
     end
 
-    local by_id = {}
-    for _, window in ipairs(State.ScrollSpace.window_filter:getWindows()) do
-        by_id[window:id()] = window
-    end
-
+    -- liveness check by id, NOT State.ScrollSpace.window_filter:getWindows()
+    -- -- confirmed live that getWindows() only returns currently-visible
+    -- windows, silently excluding every minimized window (i.e. everything
+    -- on every non-active workspace, which is the entire point of this
+    -- design). hs.window.get(id) finds a window regardless of minimized
+    -- state, same as pruneDead() already relies on.
     window_list = {}
     for workspace_str, columns in pairs(snapshot.window_list or {}) do
         local workspace = tonumber(workspace_str)
         for _, ids in ipairs(columns) do
             local rows = {}
             for _, id in ipairs(ids) do
-                local window = by_id[id]
+                local window = hs.window.get(id)
                 if window then
                     table.insert(rows, window)
                     State.uiWatcherCreate(window)
@@ -411,7 +412,7 @@ function State.load()
     State.is_floating = {}
     for id_str, workspace in pairs(snapshot.is_floating or {}) do
         local id = tonumber(id_str)
-        if by_id[id] then State.is_floating[id] = workspace end
+        if hs.window.get(id) then State.is_floating[id] = workspace end
     end
 
     State.last_focused = {}
@@ -419,7 +420,7 @@ function State.load()
         State.last_focused[tonumber(workspace_str)] = id
     end
 
-    if snapshot.scratchpad and by_id[snapshot.scratchpad] then
+    if snapshot.scratchpad and hs.window.get(snapshot.scratchpad) then
         State.scratchpad = snapshot.scratchpad
     end
 
