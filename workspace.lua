@@ -169,24 +169,40 @@ function Workspace.refreshWindows()
             and not state.windowIndex(window) then
             local allowed = visible_allowed[window:id()]
             if not allowed then
-                -- config.lua's window_filter has a blanket `visible = true`
-                -- override criterion, so isWindowAllowed() can NEVER
-                -- return true for a minimized window -- not flakiness,
-                -- structural. Minimized-and-untracked is exactly the
-                -- orphan case this function exists to recover (confirmed
-                -- live: a minimized, untracked Thunderbird window stayed
-                -- stuck invisible forever, even after switching to its
-                -- workspace, because this function could never reclaim
-                -- it). Unminimize briefly to get a real verdict out of
-                -- the filter's actual per-app/title rules, then put it
-                -- back if it turns out not to belong here after all --
-                -- addWindow() below already re-minimizes it correctly if
-                -- it belongs to a non-active workspace, so no cleanup is
-                -- needed on the "allowed" path.
-                local was_minimized = window:isMinimized()
-                if was_minimized then window:unminimize() end
-                allowed = Workspace.ScrollSpace.window_filter:isWindowAllowed(window)
-                if was_minimized and not allowed then window:minimize() end
+                -- isAppAllowed() is a cheap, visibility-independent
+                -- pre-check -- confirmed live this is required, not
+                -- optional: without it, EVERY minimized window belonging
+                -- to a fully app-rejected app (Finder, System Settings --
+                -- see the setAppFilter calls) got unminimized then
+                -- immediately re-minimized below on every refreshWindows()
+                -- call (i.e. every reload), a visible open/close flicker
+                -- for a window that was never going to pass
+                -- isWindowAllowed regardless of visibility. Confirmed live:
+                -- two minimized Finder windows flickering open/closed on
+                -- every reload, including the automatic one on wake.
+                local app = window:application()
+                if app and Workspace.ScrollSpace.window_filter:isAppAllowed(app:name()) then
+                    -- config.lua's window_filter has a blanket
+                    -- `visible = true` override criterion, so
+                    -- isWindowAllowed() can NEVER return true for a
+                    -- minimized window -- not flakiness, structural.
+                    -- Minimized-and-untracked is exactly the orphan case
+                    -- this function exists to recover (confirmed live: a
+                    -- minimized, untracked Thunderbird window stayed stuck
+                    -- invisible forever, even after switching to its
+                    -- workspace, because this function could never
+                    -- reclaim it). Unminimize briefly to get a real
+                    -- verdict out of the filter's actual per-window title
+                    -- rules, then put it back if it turns out not to
+                    -- belong here after all -- addWindow() below already
+                    -- re-minimizes it correctly if it belongs to a
+                    -- non-active workspace, so no cleanup is needed on the
+                    -- "allowed" path.
+                    local was_minimized = window:isMinimized()
+                    if was_minimized then window:unminimize() end
+                    allowed = Workspace.ScrollSpace.window_filter:isWindowAllowed(window)
+                    if was_minimized and not allowed then window:minimize() end
+                end
             end
             if allowed then
                 local workspace = Workspace.addWindow(window)
