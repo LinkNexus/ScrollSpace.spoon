@@ -148,10 +148,7 @@ function Workspace.refreshWindows()
     -- tracking, permanently breaking that workspace's tiling until fixed
     -- by hand). getWindows() membership is the trustworthy signal for any
     -- currently-visible window since it's the same list events.lua's own
-    -- subscriptions are built from; isWindowAllowed is only trusted as a
-    -- fallback for windows getWindows() can't see at all (minimized ones)
-    -- -- the orphan-recovery case this function exists for in the first
-    -- place.
+    -- subscriptions are built from.
     local visible_allowed = {}
     for _, window in ipairs(Workspace.ScrollSpace.window_filter:getWindows()) do
         visible_allowed[window:id()] = true
@@ -168,11 +165,33 @@ function Workspace.refreshWindows()
         -- more likely to hit (minimized scratchpad windows are now in
         -- scope too via allWindows()).
         if window:id() ~= state.scratchpad
-            and (visible_allowed[window:id()] or Workspace.ScrollSpace.window_filter:isWindowAllowed(window))
             and not Workspace.ScrollSpace.floating.isFloating(window)
             and not state.windowIndex(window) then
-            local workspace = Workspace.addWindow(window)
-            if workspace then retile_workspaces[workspace] = true end
+            local allowed = visible_allowed[window:id()]
+            if not allowed then
+                -- config.lua's window_filter has a blanket `visible = true`
+                -- override criterion, so isWindowAllowed() can NEVER
+                -- return true for a minimized window -- not flakiness,
+                -- structural. Minimized-and-untracked is exactly the
+                -- orphan case this function exists to recover (confirmed
+                -- live: a minimized, untracked Thunderbird window stayed
+                -- stuck invisible forever, even after switching to its
+                -- workspace, because this function could never reclaim
+                -- it). Unminimize briefly to get a real verdict out of
+                -- the filter's actual per-app/title rules, then put it
+                -- back if it turns out not to belong here after all --
+                -- addWindow() below already re-minimizes it correctly if
+                -- it belongs to a non-active workspace, so no cleanup is
+                -- needed on the "allowed" path.
+                local was_minimized = window:isMinimized()
+                if was_minimized then window:unminimize() end
+                allowed = Workspace.ScrollSpace.window_filter:isWindowAllowed(window)
+                if was_minimized and not allowed then window:minimize() end
+            end
+            if allowed then
+                local workspace = Workspace.addWindow(window)
+                if workspace then retile_workspaces[workspace] = true end
+            end
         end
     end
 
