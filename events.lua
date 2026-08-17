@@ -12,14 +12,17 @@ function Events.init(scrollspace)
     Events.ScrollSpace = scrollspace
 end
 
----refresh window layout on screen change (resolution/arrangement change --
----the canvas every workspace tiles against depends on the primary screen)
+---refresh window layout on screen change (resolution/arrangement change,
+---or a display connecting/disconnecting). reconcileScreens() first, so a
+---disconnected monitor's windows merge onto the remaining screen instead
+---of staying stranded on a screen_uuid nothing will ever tile again.
 local screen_watcher = Screen.watcher.new((function()
     local pending_timer = nil
     return function()
         if not pending_timer then
             pending_timer = Timer.doAfter(Window.animationDuration, function()
                 pending_timer = nil
+                Events.ScrollSpace.state.reconcileScreens()
                 Events.ScrollSpace.logger.d("refreshing window layout on screen change")
                 Events.ScrollSpace:tileWorkspace(Events.ScrollSpace.state.current_workspace)
             end)

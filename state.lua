@@ -36,67 +36,100 @@ function State.clear()
     State.prev_focused_window = nil
 end
 
----walk through all tiled windows in a workspace and update the index table
+---walk through all tiled windows in a workspace (across every screen) and
+---update the index table
 ---@param workspace number
 local function update_index(workspace)
-    for col, rows in ipairs(window_list[workspace] or {}) do
-        for row, window in ipairs(rows) do
-            index_table[window:id()] = { workspace = workspace, col = col, row = row }
+    for screen_uuid, columns in pairs(window_list[workspace] or {}) do
+        for col, rows in ipairs(columns) do
+            for row, window in ipairs(rows) do
+                index_table[window:id()] = { workspace = workspace, screen = screen_uuid, col = col, row = row }
+            end
         end
     end
 end
 
----get a proxy table for a workspace, column, or row of tiled windows
----the proxy table can be used to iterate over, insert, remove, and access
----windows while keeping track of internal state
----@param workspace number get a list of columns for a workspace
+---get a proxy table for a workspace's screens, a screen's columns, a
+---column's rows, or a specific window -- the proxy tables can be used to
+---iterate over, insert, remove, and access windows while keeping track of
+---internal state. Screens are a map keyed by hs.screen:getUUID() (not an
+---ordered list -- there's no meaningful "position" for a screen), so the
+---screen-level proxy only supports direct assignment/iteration, not
+---table.insert/table.remove like the column/row levels do.
+---@param workspace number get a workspace's screens
+---@param screen string|nil hs.screen:getUUID() -- get a screen's columns
 ---@param column number|nil get a list of windows for a column
 ---@param row number|nil get a window for a row in a column
----@return Window[][]|Window[]|Window|nil
-function State.windowList(workspace, column, row)
-    if workspace then
-        local columns = window_list[workspace]
-        if column then
-            local rows = columns and columns[column]
-            if row then
-                return rows and rows[row]
-            end
+---@return table|Window|nil
+function State.windowList(workspace, screen, column, row)
+    if not workspace then return end
 
-            return rows and setmetatable({}, {
-                __index = function(_, row) return rows[row] end,
-                __newindex = function(_, row, window)
-                    rows[row] = window
-                    if not next(columns[column]) then table.remove(columns, column) end
-                    if not next(window_list[workspace]) then window_list[workspace] = nil end
-                    update_index(workspace)
-                end,
-                __len = function(_) return #rows end,
-                __pairs = function(_) return pairs(rows) end,
-                __ipairs = function(_) return ipairs(rows) end,
-            })
-        end
+    local screens = window_list[workspace]
 
+    if not screen then
+        return setmetatable({}, screens and {
+            __index = function(_, screen_uuid) return screens[screen_uuid] end,
+            __newindex = function(_, screen_uuid, columns)
+                screens[screen_uuid] = columns
+                if not next(window_list[workspace]) then window_list[workspace] = nil end
+                update_index(workspace)
+            end,
+            __pairs = function(_) return pairs(screens) end,
+        } or { -- metatable for a nil workspace
+            __newindex = function(_, screen_uuid, columns)
+                if not window_list[workspace] then window_list[workspace] = {} end
+                window_list[workspace][screen_uuid] = columns
+                update_index(workspace)
+            end,
+        })
+    end
+
+    local columns = screens and screens[screen]
+
+    if not column then
         return setmetatable({}, columns and {
             __index = function(_, column) return columns[column] end,
             __newindex = function(_, column, rows)
-                -- workspace is guaranteed to exist here
+                -- screen is guaranteed to exist here
                 columns[column] = rows -- add a new column
-                -- handle case where all columns have been removed from a workspace
+                -- handle case where all columns have been removed from a screen/workspace
+                if not next(screens[screen]) then screens[screen] = nil end
                 if not next(window_list[workspace]) then window_list[workspace] = nil end
                 update_index(workspace)
             end,
             __len = function(_) return #columns end,
             __pairs = function(_) return pairs(columns) end,
             __ipairs = function(_) return ipairs(columns) end,
-        } or { -- metatable for a nil workspace
+        } or { -- metatable for a nil screen (and/or nil workspace)
             __newindex = function(_, column, rows)
-                -- workspace may not exist here so create it
+                -- screen/workspace may not exist here so create them
                 if not window_list[workspace] then window_list[workspace] = {} end
-                window_list[workspace][column] = rows
+                if not window_list[workspace][screen] then window_list[workspace][screen] = {} end
+                window_list[workspace][screen][column] = rows
                 update_index(workspace)
             end,
         })
     end
+
+    local rows = columns and columns[column]
+
+    if row then
+        return rows and rows[row]
+    end
+
+    return rows and setmetatable({}, {
+        __index = function(_, row) return rows[row] end,
+        __newindex = function(_, row, window)
+            rows[row] = window
+            if not next(columns[column]) then table.remove(columns, column) end
+            if not next(screens[screen]) then screens[screen] = nil end
+            if not next(window_list[workspace]) then window_list[workspace] = nil end
+            update_index(workspace)
+        end,
+        __len = function(_) return #rows end,
+        __pairs = function(_) return pairs(rows) end,
+        __ipairs = function(_) return ipairs(rows) end,
+    })
 end
 
 ---get the index { workspace, col, row } of a tiled window
@@ -146,17 +179,29 @@ function State.uiWatcherStopAll()
     for _, watcher in pairs(ui_watchers) do watcher:stop() end
 end
 
----return a table that provides accessor methods to x_positions via a metatable
+---return a table that provides accessor methods to x_positions via a
+---metatable. x positions are inherently per-screen (a horizontal scroll
+---position only makes sense within one screen's own canvas)
 ---@param workspace number
-function State.xPositions(workspace)
+---@param screen string hs.screen:getUUID()
+function State.xPositions(workspace, screen)
     return setmetatable({}, {
-        __index = function(_, id) return (x_positions[workspace] or {})[id] end,
+        __index = function(_, id)
+            local ws = x_positions[workspace]
+            local scr = ws and ws[screen]
+            return scr and scr[id]
+        end,
         __newindex = function(_, id, x)
             if not x_positions[workspace] then x_positions[workspace] = {} end
-            x_positions[workspace][id] = x
+            if not x_positions[workspace][screen] then x_positions[workspace][screen] = {} end
+            x_positions[workspace][screen][id] = x
+            if not next(x_positions[workspace][screen]) then x_positions[workspace][screen] = nil end
             if not next(x_positions[workspace]) then x_positions[workspace] = nil end
         end,
-        __pairs = function(_) return pairs(x_positions[workspace] or {}) end,
+        __pairs = function(_)
+            local ws = x_positions[workspace]
+            return pairs((ws and ws[screen]) or {})
+        end,
     })
 end
 
@@ -204,16 +249,19 @@ function State.pruneDead()
         end
     end
 
-    -- remove highest row/col first within each workspace so removing
-    -- one entry doesn't shift the row/col index of another pending
-    -- removal in the same column/workspace
+    -- remove highest row/col first within each workspace+screen so
+    -- removing one entry doesn't shift the row/col index of another
+    -- pending removal in the same column. Screen order doesn't matter --
+    -- screens don't interact -- it's only here to keep the sort a total
+    -- order across every dead index
     table.sort(dead_indices, function(a, b)
         if a.workspace ~= b.workspace then return a.workspace > b.workspace end
+        if a.screen ~= b.screen then return a.screen > b.screen end
         if a.col ~= b.col then return a.col > b.col end
         return a.row > b.row
     end)
     for _, index in ipairs(dead_indices) do
-        table.remove(State.windowList(index.workspace, index.col), index.row)
+        table.remove(State.windowList(index.workspace, index.screen, index.col), index.row)
     end
     for _, id in ipairs(dead_ids) do State.uiWatcherDelete(id) end
 
@@ -231,6 +279,60 @@ function State.pruneDead()
         State.ScrollSpace.logger.d("pruned " .. pruned .. " dead window(s)")
         State.save()
     end
+end
+
+---resolve a persisted/tracked screen UUID to a currently-connected
+---screen, falling back to the primary screen if that exact display isn't
+---connected right now (e.g. an external monitor that's been unplugged).
+---Shared by State.load()'s startup reconciliation and the live
+---disconnect handling in State.reconcileScreens().
+---@param uuid string|nil
+---@return userdata screen
+function State.resolveScreen(uuid)
+    local screen = uuid and hs.screen.find(uuid)
+    return screen or hs.screen.primaryScreen()
+end
+
+---merge any workspace's screen bucket whose display is no longer
+---connected onto the primary screen's bucket for that workspace, so
+---disconnecting a monitor doesn't strand its windows until that exact
+---display reconnects. Called from events.lua's screen_watcher.
+---@return boolean true if anything moved (caller should retile)
+function State.reconcileScreens()
+    local primary = hs.screen.primaryScreen()
+    if not primary then return false end
+    local primary_uuid = primary:getUUID()
+
+    -- collect first, mutate after: adding a new key to window_list[workspace]
+    -- (creating the primary bucket via State.windowList below) while still
+    -- iterating pairs(window_list[workspace]) is undefined behavior in Lua
+    local stale = {}
+    for workspace, screens in pairs(window_list) do
+        for screen_uuid, _ in pairs(screens) do
+            if screen_uuid ~= primary_uuid and not hs.screen.find(screen_uuid) then
+                table.insert(stale, { workspace = workspace, screen_uuid = screen_uuid })
+            end
+        end
+    end
+
+    local moved = false
+    for _, entry in ipairs(stale) do
+        local columns = window_list[entry.workspace] and window_list[entry.workspace][entry.screen_uuid]
+        if columns then
+            local target = State.windowList(entry.workspace, primary_uuid)
+            for _, column in ipairs(columns) do
+                table.insert(target, column)
+            end
+            window_list[entry.workspace][entry.screen_uuid] = nil
+            moved = true
+        end
+    end
+
+    if moved then
+        for workspace, _ in pairs(window_list) do update_index(workspace) end
+        State.save()
+    end
+    return moved
 end
 
 ---return internal state for debugging purposes
@@ -255,20 +357,23 @@ function State.dump()
     table.insert(output, string.format("current_workspace: %s", tostring(State.current_workspace)))
 
     table.insert(output, "window_list:")
-    for workspace, columns in pairs(window_list) do
+    for workspace, screens in pairs(window_list) do
         table.insert(output, string.format("  Workspace %s:", tostring(workspace)))
-        for col_idx, column in ipairs(columns) do
-            table.insert(output, string.format("    Column %d:", col_idx))
-            for row_idx, window in ipairs(column) do
-                table.insert(output, string.format("      Row %d: %s (%d)", row_idx, window:title(), window:id()))
+        for screen_uuid, columns in pairs(screens) do
+            table.insert(output, string.format("    Screen %s:", screen_uuid))
+            for col_idx, column in ipairs(columns) do
+                table.insert(output, string.format("      Column %d:", col_idx))
+                for row_idx, window in ipairs(column) do
+                    table.insert(output, string.format("        Row %d: %s (%d)", row_idx, window:title(), window:id()))
+                end
             end
         end
     end
 
     table.insert(output, "\nindex_table:")
     for id, index in pairs(index_table) do
-        table.insert(output, string.format("  Window ID %d: workspace=%s, col=%d, row=%d",
-            id, tostring(index.workspace), index.col, index.row))
+        table.insert(output, string.format("  Window ID %d: workspace=%s, screen=%s, col=%d, row=%d",
+            id, tostring(index.workspace), tostring(index.screen), index.col, index.row))
     end
 
     table.insert(output, "\nis_floating:")
@@ -301,16 +406,20 @@ local function serialize()
         last_focused = {},
     }
 
-    for workspace, columns in pairs(window_list) do
-        local cols = {}
-        for _, rows in ipairs(columns) do
-            local ids = {}
-            for _, window in ipairs(rows) do
-                table.insert(ids, window:id())
+    for workspace, screens in pairs(window_list) do
+        local screens_out = {}
+        for screen_uuid, columns in pairs(screens) do
+            local cols = {}
+            for _, rows in ipairs(columns) do
+                local ids = {}
+                for _, window in ipairs(rows) do
+                    table.insert(ids, window:id())
+                end
+                table.insert(cols, ids)
             end
-            table.insert(cols, ids)
+            screens_out[screen_uuid] = cols -- already a string (hs.screen:getUUID()), no tostring() needed
         end
-        snapshot.window_list[tostring(workspace)] = cols
+        snapshot.window_list[tostring(workspace)] = screens_out
     end
 
     for id, workspace in pairs(State.is_floating) do
@@ -390,23 +499,49 @@ function State.load()
     -- design). hs.window.get(id) finds a window regardless of minimized
     -- state, same as pruneDead() already relies on.
     window_list = {}
-    for workspace_str, columns in pairs(snapshot.window_list or {}) do
+    for workspace_str, screens in pairs(snapshot.window_list or {}) do
         local workspace = tonumber(workspace_str)
-        for _, ids in ipairs(columns) do
-            local rows = {}
-            for _, id in ipairs(ids) do
-                local window = hs.window.get(id)
-                if window then
-                    table.insert(rows, window)
-                    State.uiWatcherCreate(window)
+
+        -- format migration: a pre-screen-field snapshot has
+        -- window_list[workspace] as a plain array of column-id-arrays
+        -- (integer keys 1,2,3...), not a map of screen-uuid -> columns
+        -- (string keys). Skip this workspace's window_list entirely
+        -- rather than misinterpreting the shape -- refreshWindows()
+        -- rediscovers every live window from scratch regardless, so an
+        -- empty start here is a safe degrade, same as corrupt JSON below.
+        local is_screen_map = workspace and type(screens) == "table"
+        if is_screen_map then
+            for screen_uuid, _ in pairs(screens) do
+                if type(screen_uuid) ~= "string" then
+                    is_screen_map = false
+                    break
                 end
             end
-            if #rows > 0 then
-                if not window_list[workspace] then window_list[workspace] = {} end
-                table.insert(window_list[workspace], rows)
-            end
         end
-        if window_list[workspace] then update_index(workspace) end
+
+        if is_screen_map then
+            for screen_uuid, columns in pairs(screens) do
+                -- a monitor that isn't connected right now merges onto
+                -- the primary screen instead of silently vanishing
+                local target_uuid = State.resolveScreen(screen_uuid):getUUID()
+                for _, ids in ipairs(columns) do
+                    local rows = {}
+                    for _, id in ipairs(ids) do
+                        local window = hs.window.get(id)
+                        if window then
+                            table.insert(rows, window)
+                            State.uiWatcherCreate(window)
+                        end
+                    end
+                    if #rows > 0 then
+                        if not window_list[workspace] then window_list[workspace] = {} end
+                        if not window_list[workspace][target_uuid] then window_list[workspace][target_uuid] = {} end
+                        table.insert(window_list[workspace][target_uuid], rows)
+                    end
+                end
+            end
+            if window_list[workspace] then update_index(workspace) end
+        end
     end
 
     State.is_floating = {}

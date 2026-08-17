@@ -21,6 +21,7 @@ Config.default_hotkeys = {
     slurp_in            = { { "alt", "cmd" }, "," },
     barf_out            = { { "alt", "cmd", "shift" }, "," },
     toggle_floating     = { { "alt", "cmd", "shift" }, "escape" },
+    move_window_to_next_screen = { { "alt", "cmd" }, "o" },
     toggle_scratchpad   = { { "alt", "cmd" }, "s" },
     set_scratchpad      = { { "alt", "cmd", "shift" }, "s" },
     switch_workspace_1  = { { "alt", "cmd" }, "1" },

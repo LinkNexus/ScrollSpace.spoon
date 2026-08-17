@@ -113,11 +113,33 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
   (PaperWM already excludes non-standard windows via
   `allowRoles = "AXStandardWindow"`; add a defensive `subrole()` check too
   since native PiP windows report a distinct subrole).
-- **Multi-monitor: deferred.** Current plan (not yet implemented) is that a
-  workspace spans all connected monitors at once, rather than being
-  per-monitor. Build for single-monitor first (`Screen.primaryScreen()`),
-  but don't hardcode assumptions that would make spanning multiple screens
-  hard to add later — keep monitor/canvas lookup as its own function.
+- **Multi-monitor: implemented.** A workspace spans every connected
+  screen at once — each screen tiles its own independent column strip
+  (`window_list[workspace][screen_uuid][col][row]`, keyed by
+  `hs.screen:getUUID()`), all showing/hiding together when the workspace
+  switches, but scrolling/navigation (focus/swap/slurp/barf) stays within
+  one screen at a time. `move_window_to_next_screen` cycles the focused
+  window to the next connected screen, keeping its workspace.
+
+  Off-viewport columns (ones scrolled past a screen's own edge) are
+  **minimized**, not positioned off-canvas via coordinates. Confirmed
+  live: macOS always clamps a window's frame back to overlap the nearest
+  connected screen, no matter how far off-canvas `setFrame()` tries to
+  push it — there's no x-coordinate that's genuinely invisible once the
+  desktop has monitor coverage in that direction (this was a real, if
+  previously unnoticed, gap in single-monitor mode too — the same
+  clamping left a small sliver visible at the screen edge; a second
+  monitor just turns that sliver into most of a window). `focusWindow()`
+  (windows.lua) explicitly retiles after `:focus()` rather than relying
+  solely on the `windowFocused` AX event — confirmed live that focusing a
+  minimized window unminimizes it via macOS directly without reliably
+  firing that notification afterward.
+
+  A monitor disconnecting merges its windows onto the primary screen
+  (`State.reconcileScreens()`, called from `events.lua`'s screen_watcher)
+  rather than stranding them until that exact display reconnects; a
+  monitor not connected at load time gets the same treatment in
+  `State.load()` via `State.resolveScreen()`.
 
 ## Features to implement
 
@@ -166,7 +188,6 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
 
 ## Explicitly out of scope for v1
 
-- Multi-monitor spanning (design intent noted above, not implemented yet).
 - Slurp/barf (can port from PaperWM later if wanted).
 - Reacting to a user manually minimizing a window via the traffic-light
   button (currently only our own explicit calls are expected to minimize

@@ -13,13 +13,17 @@ end
 ---workspace via Rules.assign unless `workspace` is given explicitly (used
 ---when re-inserting a window that already had a known workspace, e.g.
 ---un-floating -- re-running rules there could send it somewhere other than
----where it was floating). Windows assigned to a workspace other than the
----currently active one are minimized immediately so they don't appear on
----screen while some other workspace is showing.
+---where it was floating). Screen defaults to wherever the window actually
+---is (add_window:screen()) unless given explicitly -- a workspace spans
+---every connected screen, each with its own independent column strip.
+---Windows assigned to a workspace other than the currently active one are
+---minimized immediately so they don't appear on screen while some other
+---workspace is showing.
 ---@param add_window Window new window to be added
 ---@param workspace number|nil explicit target workspace, skips Rules.assign
+---@param screen string|nil explicit target screen (hs.screen:getUUID()), skips add_window:screen()
 ---@return number|nil workspace that contains the new window
-function Workspace.addWindow(add_window, workspace)
+function Workspace.addWindow(add_window, workspace, screen)
     local state = Workspace.ScrollSpace.state
 
     -- A window with no tabs will have a tabCount of 0 or 1. Built-in Apple
@@ -58,16 +62,18 @@ function Workspace.addWindow(add_window, workspace)
     end
 
     workspace = workspace or Workspace.ScrollSpace.rule_engine.assign(add_window)
+    screen = screen or add_window:screen():getUUID()
 
-    -- find where to insert window
+    -- find where to insert window (within this screen's own column list --
+    -- a workspace spans every connected screen, each tiling independently)
     local add_column = 1
-    if state.prev_focused_window and
-        ((state.windowIndex(state.prev_focused_window) or {}).workspace == workspace) and
+    local prev_focused_index = state.prev_focused_window and state.windowIndex(state.prev_focused_window)
+    if prev_focused_index and prev_focused_index.workspace == workspace and prev_focused_index.screen == screen and
         (state.prev_focused_window:id() ~= add_window:id()) then
-        add_column = state.windowIndex(state.prev_focused_window).col + 1
+        add_column = prev_focused_index.col + 1
     else
         local x = add_window:frame().center.x
-        for col, windows in ipairs(state.windowList(workspace)) do
+        for col, windows in ipairs(state.windowList(workspace, screen)) do
             if x < windows[1]:frame().center.x then
                 add_column = col
                 break
@@ -77,11 +83,11 @@ function Workspace.addWindow(add_window, workspace)
         end
     end
 
-    table.insert(state.windowList(workspace), add_column, { add_window })
+    table.insert(state.windowList(workspace, screen), add_column, { add_window })
     state.uiWatcherCreate(add_window)
 
-    Workspace.ScrollSpace.logger.df("adding window: %s (%d) to workspace %d", add_window:title(), add_window:id(),
-        workspace)
+    Workspace.ScrollSpace.logger.df("adding window: %s (%d) to workspace %d, screen %s", add_window:title(),
+        add_window:id(), workspace, screen)
 
     if workspace ~= state.current_workspace then
         add_window:minimize()
@@ -111,13 +117,14 @@ function Workspace.removeWindow(remove_window, skip_new_window_focus)
         end
     end
 
-    if remove_window ~= table.remove(state.windowList(remove_index.workspace, remove_index.col), remove_index.row) then
+    if remove_window ~=
+        table.remove(state.windowList(remove_index.workspace, remove_index.screen, remove_index.col), remove_index.row) then
         Workspace.ScrollSpace.logger.ef("removed window %s (%d) doesn't match", remove_window:title(),
             remove_window:id())
     end
 
     state.uiWatcherDelete(remove_window:id())
-    state.xPositions(remove_index.workspace)[remove_window:id()] = nil
+    state.xPositions(remove_index.workspace, remove_index.screen)[remove_window:id()] = nil
 
     if state.prev_focused_window == remove_window then
         state.prev_focused_window = nil
@@ -222,9 +229,11 @@ end
 ---@param workspace number
 local function hideWorkspace(workspace)
     local state = Workspace.ScrollSpace.state
-    for _, column in ipairs(state.windowList(workspace)) do
-        for _, window in ipairs(column) do
-            window:minimize()
+    for _, columns in pairs(state.windowList(workspace)) do
+        for _, column in ipairs(columns) do
+            for _, window in ipairs(column) do
+                window:minimize()
+            end
         end
     end
     for id, floating_workspace in pairs(state.is_floating) do
@@ -239,9 +248,11 @@ end
 ---@param workspace number
 local function showWorkspace(workspace)
     local state = Workspace.ScrollSpace.state
-    for _, column in ipairs(state.windowList(workspace)) do
-        for _, window in ipairs(column) do
-            window:unminimize()
+    for _, columns in pairs(state.windowList(workspace)) do
+        for _, column in ipairs(columns) do
+            for _, window in ipairs(column) do
+                window:unminimize()
+            end
         end
     end
     for id, floating_workspace in pairs(state.is_floating) do
@@ -282,8 +293,12 @@ function Workspace.switchWorkspace(n)
     if last_window then
         last_window:focus()
     else
-        local columns = state.windowList(n)
-        if columns[1] and columns[1][1] then columns[1][1]:focus() end
+        for _, columns in pairs(state.windowList(n)) do
+            if columns[1] and columns[1][1] then
+                columns[1][1]:focus()
+                break
+            end
+        end
     end
 
     state.save()
@@ -291,8 +306,9 @@ end
 
 ---move a window to another workspace: list surgery only (remove from its
 ---current column, insert as a new column at the end of the target
----workspace's list), keeping its uielement watcher alive. Minimizes the
----window if the target workspace isn't the active one.
+---workspace's list, on the SAME screen it was already on), keeping its
+---uielement watcher alive. Minimizes the window if the target workspace
+---isn't the active one.
 ---@param window Window|nil defaults to the focused window
 ---@param n number target workspace id
 function Workspace.moveWindowToWorkspace(window, n)
@@ -315,8 +331,8 @@ function Workspace.moveWindowToWorkspace(window, n)
             return
         end
         if index.workspace == n then return end
-        table.remove(state.windowList(index.workspace, index.col), index.row)
-        table.insert(state.windowList(n), { window })
+        table.remove(state.windowList(index.workspace, index.screen, index.col), index.row)
+        table.insert(state.windowList(n, index.screen), { window })
     end
 
     if n == current then
@@ -326,6 +342,55 @@ function Workspace.moveWindowToWorkspace(window, n)
         Workspace.ScrollSpace:tileWorkspace(current)
     end
 
+    state.save()
+end
+
+---move a window to the next connected screen (cycling, wraps around),
+---keeping it on the same workspace: list surgery only (remove from its
+---current screen's column, insert as a new column at the end of the
+---target screen's list), same shape as moveWindowToWorkspace above but
+---keyed by screen instead of workspace. Floating/scratchpad windows have
+---no screen concept in this data model (they're just minimized/
+---unminimized wherever the OS already put them), so this is a no-op for
+---them.
+---@param window Window|nil defaults to the focused window
+function Workspace.moveWindowToNextScreen(window)
+    window = window or Window.focusedWindow()
+    if not window then
+        Workspace.ScrollSpace.logger.d("focused window not found")
+        return
+    end
+
+    local state = Workspace.ScrollSpace.state
+    local index = state.windowIndex(window)
+    if not index then
+        Workspace.ScrollSpace.logger.d("window is not tiled (floating/scratchpad windows don't have a screen to move between)")
+        return
+    end
+
+    local screens = hs.screen.allScreens()
+    if #screens < 2 then return end
+    table.sort(screens, function(a, b) return a:frame().x < b:frame().x end)
+
+    local current_pos = nil
+    for i, screen in ipairs(screens) do
+        if screen:getUUID() == index.screen then
+            current_pos = i
+            break
+        end
+    end
+    if not current_pos then
+        Workspace.ScrollSpace.logger.e("window's screen not found among connected screens")
+        return
+    end
+
+    local target_screen = screens[(current_pos % #screens) + 1]
+    local target_uuid = target_screen:getUUID()
+
+    table.remove(state.windowList(index.workspace, index.screen, index.col), index.row)
+    table.insert(state.windowList(index.workspace, target_uuid), { window })
+
+    Workspace.ScrollSpace:tileWorkspace(index.workspace)
     state.save()
 end
 

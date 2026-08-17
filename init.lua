@@ -125,9 +125,11 @@ function ScrollSpace:stop()
     -- unminimize everything on every workspace (not just the active one) so
     -- nothing is left stranded hidden once we stop managing visibility
     for _, workspace in ipairs(self.state.allWorkspaces()) do
-        for _, column in ipairs(self.state.windowList(workspace)) do
-            for _, window in ipairs(column) do
-                window:unminimize()
+        for _, columns in pairs(self.state.windowList(workspace)) do
+            for _, column in ipairs(columns) do
+                for _, window in ipairs(column) do
+                    window:unminimize()
+                end
             end
         end
     end
