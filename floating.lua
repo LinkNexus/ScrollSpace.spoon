@@ -40,12 +40,12 @@ function Floating.toggleFloating(window)
         -- Rules.assign -- rules could otherwise send it somewhere else)
         workspace = Floating.ScrollSpace.state.is_floating[window:id()]
         Floating.removeFloating(window)
-        Floating.ScrollSpace.workspace.addWindow(window, workspace)
+        Floating.ScrollSpace.windows.addWindow(window, workspace)
     else
         -- float: remove from tiled window_list, add to is_floating tagged with its workspace
         local index = Floating.ScrollSpace.state.windowIndex(window)
         workspace = index and index.workspace or Floating.ScrollSpace.state.current_workspace
-        Floating.ScrollSpace.workspace.removeWindow(window, true)
+        Floating.ScrollSpace.windows.removeWindow(window, true)
         Floating.ScrollSpace.state.is_floating[window:id()] = workspace
     end
 

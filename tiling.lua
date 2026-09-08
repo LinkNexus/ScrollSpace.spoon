@@ -21,6 +21,31 @@ local function update_virtual_positions(workspace, screen, windows, x)
     end
 end
 
+---project a screen's column strip down to just the windows that are
+---actually on screen right now, preserving column indices so an
+---anchor's `col` stays meaningful.
+---
+---Minimized windows deliberately stay in window_list -- that's the whole
+---point of this design, it's what lets a workspace's column order
+---survive a hide/show cycle untouched. They must not take part in layout
+---math though: a minimized window would otherwise claim a share of its
+---column's height and, if a whole column were hidden, leave a gap that
+---shifts every column to its right.
+---@param workspace number
+---@param screen_uuid string
+---@return Window[][] columns indexed as in window_list, minus hidden windows
+local function visible_columns(workspace, screen_uuid)
+    local columns = {}
+    for col, rows in ipairs(Tiling.ScrollSpace.state.windowList(workspace, screen_uuid)) do
+        local visible = {}
+        for _, window in ipairs(rows) do
+            if not window:isMinimized() then table.insert(visible, window) end
+        end
+        columns[col] = visible
+    end
+    return columns
+end
+
 ---tile a column of window by moving and resizing
 ---@param windows Window[] column of windows
 ---@param bounds Frame bounds to constrain column of tiled windows
@@ -36,16 +61,16 @@ function Tiling.tileColumn(windows, bounds, h, w, id, h4id)
     for _, window in ipairs(windows) do
         frame = window:frame()
         w = w or frame.w -- take given width or width of first window
-        if bounds.x then
+        if bounds.x then -- set either left or right x coord
             frame.x = bounds.x
         elseif bounds.x2 then
             frame.x = bounds.x2 - w
         end
-        if h then
+        if h then              -- set height if given
             if id and h4id and window:id() == id then
-                frame.h = h4id
+                frame.h = h4id -- use this height for window with id
             else
-                frame.h = h
+                frame.h = h    -- use this height for all other windows
             end
         end
         frame.y = bounds.y
@@ -74,31 +99,29 @@ end
 local function tileScreen(workspace, screen, anchor_window)
     local state = Tiling.ScrollSpace.state
     local screen_uuid = screen:getUUID()
+    local columns = visible_columns(workspace, screen_uuid)
 
-    local function windowOnScreen(window)
+    ---a window can anchor tiling only if it's tracked on this exact
+    ---screen and currently on screen (a hidden window has no frame worth
+    ---laying the rest of the strip out from)
+    local function canAnchor(window)
+        if not window or window:isMinimized() then return false end
         local index = state.windowIndex(window)
         return index ~= nil and index.workspace == workspace and index.screen == screen_uuid
     end
 
     -- if anchor window is on this screen, tile from that. otherwise use focused window
-    if not (anchor_window and windowOnScreen(anchor_window)) then
+    if not canAnchor(anchor_window) then
         local focused_window = Window.focusedWindow()
-        if focused_window and not Tiling.ScrollSpace.floating.isFloating(focused_window) and windowOnScreen(focused_window) then
+        if focused_window and not Tiling.ScrollSpace.floating.isFloating(focused_window) and canAnchor(focused_window) then
             anchor_window = focused_window
         else
             anchor_window = Tiling.ScrollSpace.windows.getFirstVisibleWindow(workspace, screen)
         end
     end
 
-    if not anchor_window or not windowOnScreen(anchor_window) then
-        -- nothing visible to anchor from (e.g. screen has only just-hidden
-        -- windows momentarily) -- fall back to the first column's first window
-        local columns = state.windowList(workspace, screen_uuid)
-        if columns and columns[1] and columns[1][1] then
-            anchor_window = columns[1][1]
-        else
-            return -- nothing tiled on this screen
-        end
+    if not canAnchor(anchor_window) then
+        return -- nothing visible on this screen to tile
     end
 
     local anchor_index = state.windowIndex(anchor_window)
@@ -107,11 +130,13 @@ local function tileScreen(workspace, screen, anchor_window)
         return
     end
 
+    -- get some global coordinates
     local screen_frame <const> = screen:frame()
     local left_margin <const> = screen_frame.x + Tiling.ScrollSpace.screen_margin
     local right_margin <const> = screen_frame.x2 - Tiling.ScrollSpace.screen_margin
     local canvas <const> = Tiling.ScrollSpace.windows.getCanvas(screen)
 
+    -- make sure anchor window is on screen
     local anchor_frame = anchor_window:frame()
     anchor_frame.x = math.max(anchor_frame.x, canvas.x)
     anchor_frame.w = math.min(anchor_frame.w, canvas.w)
@@ -120,18 +145,18 @@ local function tileScreen(workspace, screen, anchor_window)
         anchor_frame.x = canvas.x2 - anchor_frame.w
     end
 
-    local column = state.windowList(workspace, screen_uuid, anchor_index.col)
-    if not column then
+    -- adjust anchor window column
+    local column = columns[anchor_index.col]
+    if not column or #column == 0 then
         Tiling.ScrollSpace.logger.e("no anchor window column")
         return
     end
 
-    for _, window in ipairs(column) do window:unminimize() end
     if #column == 1 then
         anchor_frame.y, anchor_frame.h = canvas.y, canvas.h
         Tiling.ScrollSpace.windows.moveWindow(anchor_window, anchor_frame)
     else
-        local n = #column - 1
+        local n = #column - 1 -- number of other windows in column
         local bottom_gap = Tiling.ScrollSpace.windows.getGap("bottom")
         local h = math.max(0, canvas.h - anchor_frame.h - (n * bottom_gap)) // n
         local bounds = { x = anchor_frame.x, x2 = nil, y = canvas.y, y2 = canvas.y2 }
@@ -142,63 +167,29 @@ local function tileScreen(workspace, screen, anchor_window)
     local right_gap = Tiling.ScrollSpace.windows.getGap("right")
     local left_gap = Tiling.ScrollSpace.windows.getGap("left")
 
-    -- tile windows from anchor right, minimizing any column that doesn't
-    -- fit within the canvas instead of positioning it off-canvas.
-    -- Confirmed live: macOS always clamps a window's frame back to
-    -- overlap the nearest connected screen, no matter how far off-canvas
-    -- you try to push it via setFrame -- there is no x-coordinate that's
-    -- genuinely invisible once the desktop has monitor coverage in that
-    -- direction, so coordinate placement can't reliably hide a column
-    -- that doesn't fit. minimize()/unminimize() is the only mechanism
-    -- that actually works (same one already used for inactive
-    -- workspaces) -- windowNotVisible/windowVisible already no-op for
-    -- our own minimize()/unminimize() calls (see events.lua), so no
-    -- further event-handling changes are needed. Peek at each column's
-    -- own natural width (same value tileColumn falls back to via
-    -- `w or frame.w`) to decide whether it actually fits -- checking
-    -- only the starting x against right_margin misses a single wide
-    -- column that starts within the margin but is wide enough to carry
-    -- its far edge past the screen anyway.
+    -- tile windows from anchor right. fully hidden columns are skipped
+    -- outright rather than consuming a slot's worth of x -- they occupy
+    -- no space on screen, so the strip closes up over them
     local x = anchor_frame.x2 + right_gap
-    local overflowed = false
-    for col = anchor_index.col + 1, #(state.windowList(workspace, screen_uuid)) do
-        local col_windows = state.windowList(workspace, screen_uuid, col)
-        if not overflowed then
-            local natural_w = (col_windows[1] and col_windows[1]:frame().w) or 0
-            if x + natural_w <= right_margin then
-                local bounds = { x = x, x2 = nil, y = canvas.y, y2 = canvas.y2 }
-                local width = Tiling.tileColumn(col_windows, bounds)
-                update_virtual_positions(workspace, screen_uuid, col_windows, x)
-                for _, window in ipairs(col_windows) do window:unminimize() end
-                x = x + width + right_gap
-            else
-                overflowed = true
-            end
-        end
-        if overflowed then
-            for _, window in ipairs(col_windows) do window:minimize() end
+    for col = anchor_index.col + 1, #columns do
+        local col_windows = columns[col]
+        if #col_windows > 0 then
+            local bounds = { x = math.min(x, right_margin), x2 = nil, y = canvas.y, y2 = canvas.y2 }
+            local width = Tiling.tileColumn(col_windows, bounds)
+            update_virtual_positions(workspace, screen_uuid, col_windows, x)
+            x = x + width + right_gap
         end
     end
 
-    -- tile windows from anchor left (same minimize-off-viewport reasoning as above)
+    -- tile windows from anchor left
     local x2 = anchor_frame.x - left_gap
-    local overflowed_left = false
     for col = anchor_index.col - 1, 1, -1 do
-        local col_windows = state.windowList(workspace, screen_uuid, col)
-        if not overflowed_left then
-            local natural_w = (col_windows[1] and col_windows[1]:frame().w) or 0
-            if x2 - natural_w >= left_margin then
-                local bounds = { x = nil, x2 = x2, y = canvas.y, y2 = canvas.y2 }
-                local width = Tiling.tileColumn(col_windows, bounds)
-                update_virtual_positions(workspace, screen_uuid, col_windows, x2 - width)
-                for _, window in ipairs(col_windows) do window:unminimize() end
-                x2 = x2 - width - left_gap
-            else
-                overflowed_left = true
-            end
-        end
-        if overflowed_left then
-            for _, window in ipairs(col_windows) do window:minimize() end
+        local col_windows = columns[col]
+        if #col_windows > 0 then
+            local bounds = { x = nil, x2 = math.max(x2, left_margin), y = canvas.y, y2 = canvas.y2 }
+            local width = Tiling.tileColumn(col_windows, bounds)
+            update_virtual_positions(workspace, screen_uuid, col_windows, x2 - width)
+            x2 = x2 - width - left_gap
         end
     end
 end

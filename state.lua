@@ -263,7 +263,16 @@ function State.pruneDead()
     for _, index in ipairs(dead_indices) do
         table.remove(State.windowList(index.workspace, index.screen, index.col), index.row)
     end
-    for _, id in ipairs(dead_ids) do State.uiWatcherDelete(id) end
+    for _, id in ipairs(dead_ids) do
+        -- update_index() only rewrites entries for windows still in the
+        -- list, it never deletes the departed one's -- so clear it here or
+        -- the id stays permanently "tiled". That matters beyond tidiness:
+        -- macOS recycles CGWindowIDs, and addWindow() refuses to track any
+        -- window whose id already has an index entry, so a stale entry can
+        -- lock a brand new window out of tiling for good.
+        index_table[id] = nil
+        State.uiWatcherDelete(id)
+    end
 
     local dead_floating = {}
     for id, _ in pairs(State.is_floating) do

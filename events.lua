@@ -58,6 +58,7 @@ function Events.windowEventHandler(window, event, self)
     if self.state.scratchpad == window:id() then
         if event == "windowDestroyed" then
             self.state.scratchpad = nil
+            self.state.save()
         end
         return
     end
@@ -69,6 +70,8 @@ function Events.windowEventHandler(window, event, self)
     if self.floating.isFloating(window) then
         if event == "windowDestroyed" then
             self.floating.removeFloating(window)
+            self.state.uiWatcherDelete(window:id())
+            self.state.save()
         end
         return
     end
@@ -92,22 +95,27 @@ function Events.windowEventHandler(window, event, self)
             -- switch re-triggered this event, not a genuinely new window
             return
         end
-        workspace, anchor_window = self.workspace.addWindow(window), window
+        workspace, anchor_window = self.windows.addWindow(window), window
     elseif event == "windowNotVisible" then
         -- do NOT remove the window from window_list here -- this fires for
         -- our own minimize() calls during a workspace switch too, and
         -- removing it would defeat the entire point of this design.
         -- Only windowDestroyed does real list surgery.
     elseif event == "windowFullscreened" then
-        workspace = self.workspace.removeWindow(window, true) -- don't focus new window if fullscreened
+        workspace = self.windows.removeWindow(window, true) -- don't focus new window if fullscreened
     elseif event == "windowDestroyed" then
-        workspace = self.workspace.removeWindow(window)
+        workspace = self.windows.removeWindow(window)
         self.state.save()
     elseif event == "windowTitleChanged" then
+        -- re-run the assignment rules so a window can follow its own
+        -- title between workspaces. Only an explicit rule match moves it:
+        -- assign() returns nil when nothing matched, and a non-match must
+        -- leave the window where it already is rather than pulling it
+        -- onto whatever workspace happens to be active.
         local index = self.state.windowIndex(window)
         if index then
             local reassigned = self.rule_engine.assign(window)
-            if reassigned ~= index.workspace then
+            if reassigned and reassigned ~= index.workspace then
                 self.workspace.moveWindowToWorkspace(window, reassigned)
             end
         end

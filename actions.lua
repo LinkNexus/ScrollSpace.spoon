@@ -15,7 +15,8 @@ function Actions.actions()
     local Direction = Actions.ScrollSpace.windows.Direction
     local spec = {
         stop_events = Fnutils.partial(Actions.ScrollSpace.stop, Actions.ScrollSpace),
-        refresh_windows = Actions.ScrollSpace.workspace.refreshWindows,
+        refresh_windows = Actions.ScrollSpace.windows.refreshWindows,
+        dump_state = Actions.ScrollSpace.state.dump,
         focus_left = Fnutils.partial(Actions.ScrollSpace.windows.focusWindow, Direction.LEFT),
         focus_right = Fnutils.partial(Actions.ScrollSpace.windows.focusWindow, Direction.RIGHT),
         focus_up = Fnutils.partial(Actions.ScrollSpace.windows.focusWindow, Direction.UP),

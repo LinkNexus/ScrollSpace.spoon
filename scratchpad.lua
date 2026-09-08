@@ -29,7 +29,7 @@ function Scratchpad.setScratchpad(window)
         local old = Window.get(state.scratchpad)
         state.scratchpad = nil
         if old then
-            local workspace = ScrollSpace.workspace.addWindow(old)
+            local workspace = ScrollSpace.windows.addWindow(old)
             if workspace then ScrollSpace:tileWorkspace(workspace) end
         end
     end
@@ -37,7 +37,7 @@ function Scratchpad.setScratchpad(window)
     if ScrollSpace.floating.isFloating(window) then
         ScrollSpace.floating.removeFloating(window)
     elseif state.windowIndex(window) then
-        local workspace = ScrollSpace.workspace.removeWindow(window, true)
+        local workspace = ScrollSpace.windows.removeWindow(window, true)
         if workspace then ScrollSpace:tileWorkspace(workspace) end
     end
 

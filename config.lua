@@ -7,6 +7,7 @@ Config.__index = Config
 Config.default_hotkeys = {
     stop_events         = { { "alt", "cmd", "shift" }, "q" },
     refresh_windows     = { { "alt", "cmd", "shift" }, "r" },
+    dump_state          = { { "alt", "cmd", "shift" }, "d" },
     focus_left          = { { "alt", "cmd" }, "left" },
     focus_right         = { { "alt", "cmd" }, "right" },
     focus_up            = { { "alt", "cmd" }, "up" },

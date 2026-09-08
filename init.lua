@@ -41,21 +41,25 @@ ScrollSpace.license = "MIT - https://opensource.org/licenses/MIT"
 -- logger
 ScrollSpace.logger = hs.logger.new(ScrollSpace.name)
 
--- Load modules
+-- Load modules. Same split as PaperWM.spoon: windows.lua owns window-list
+-- surgery (add/remove/refresh) and per-window commands, workspace.lua is the
+-- analogue of PaperWM's space.lua (switching, moving windows between
+-- workspaces/screens). rules.lua and scratchpad.lua have no PaperWM
+-- counterpart.
 ScrollSpace.config = dofile(hs.spoons.resourcePath("config.lua"))
 ScrollSpace.state = dofile(hs.spoons.resourcePath("state.lua"))
 ScrollSpace.windows = dofile(hs.spoons.resourcePath("windows.lua"))
+ScrollSpace.workspace = dofile(hs.spoons.resourcePath("workspace.lua"))
+ScrollSpace.events = dofile(hs.spoons.resourcePath("events.lua"))
+ScrollSpace.actions = dofile(hs.spoons.resourcePath("actions.lua"))
+ScrollSpace.floating = dofile(hs.spoons.resourcePath("floating.lua"))
 ScrollSpace.tiling = dofile(hs.spoons.resourcePath("tiling.lua"))
 -- named rule_engine, not rules -- ScrollSpace.rules is the user-facing
 -- assignment-rules table (from config.lua's Config.rules), and the config
 -- apply loop below would silently clobber the module table if both used
 -- the same key
 ScrollSpace.rule_engine = dofile(hs.spoons.resourcePath("rules.lua"))
-ScrollSpace.floating = dofile(hs.spoons.resourcePath("floating.lua"))
 ScrollSpace.scratchpad = dofile(hs.spoons.resourcePath("scratchpad.lua"))
-ScrollSpace.workspace = dofile(hs.spoons.resourcePath("workspace.lua"))
-ScrollSpace.events = dofile(hs.spoons.resourcePath("events.lua"))
-ScrollSpace.actions = dofile(hs.spoons.resourcePath("actions.lua"))
 
 -- Apply config defaults directly onto ScrollSpace (window_gap, window_ratios,
 -- screen_margin, window_filter, rules, default_workspace, state_file,
@@ -67,15 +71,15 @@ end
 -- Initialize modules. Order doesn't matter for cross-module references --
 -- each module's init() just stores the parent ScrollSpace reference; actual
 -- calls between modules only happen later, once every module is loaded.
-ScrollSpace.state.init(ScrollSpace)
 ScrollSpace.windows.init(ScrollSpace)
-ScrollSpace.tiling.init(ScrollSpace)
-ScrollSpace.rule_engine.init(ScrollSpace)
-ScrollSpace.floating.init(ScrollSpace)
-ScrollSpace.scratchpad.init(ScrollSpace)
 ScrollSpace.workspace.init(ScrollSpace)
 ScrollSpace.events.init(ScrollSpace)
 ScrollSpace.actions.init(ScrollSpace)
+ScrollSpace.state.init(ScrollSpace)
+ScrollSpace.floating.init(ScrollSpace)
+ScrollSpace.tiling.init(ScrollSpace)
+ScrollSpace.rule_engine.init(ScrollSpace)
+ScrollSpace.scratchpad.init(ScrollSpace)
 
 ---start automatic window tiling
 ---@return ScrollSpace
@@ -89,7 +93,7 @@ function ScrollSpace:start()
     -- which must not be allowed to abort events.start() below -- without
     -- live event tracking nothing else works either, so a partial/failed
     -- initial catch-up pass is far better than no event system at all
-    local ok, err = pcall(self.workspace.refreshWindows)
+    local ok, err = pcall(self.windows.refreshWindows)
     if not ok then
         self.logger.e("refreshWindows failed during start(), continuing anyway: " .. tostring(err))
     end

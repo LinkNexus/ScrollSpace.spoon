@@ -42,10 +42,15 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
 
 - **No native macOS Spaces.** Everything happens on one real Space (or
   spans monitors — see below). `hs.spaces` is not used at all.
-- **Hide/show mechanism: `window:minimize()` / `window:unminimize()`.**
-  Off-screen positioning was ruled out — macOS clamps windows back onto the
-  visible screen margin (confirmed in PaperWM's own docs), so it can't
-  reliably hide anything.
+- **Full-workspace hide/show mechanism: `window:minimize()` /
+  `window:unminimize()`.** Applies to switching workspaces (hide every
+  window of the outgoing workspace, show every window of the incoming
+  one) and the scratchpad toggle — there coordinate positioning genuinely
+  can't hide a window (macOS clamps it back onto the visible screen
+  margin, confirmed in PaperWM's own docs). This does **not** extend to
+  intra-workspace scroll overflow — see the off-viewport-columns note
+  under Multi-monitor below, which deliberately uses coordinate
+  positioning instead for that case.
 - **Tiling: full scrolling column layout, PaperWM/niri-style.** Windows
   tile left-to-right in columns; columns can hold multiple windows stacked
   vertically; column widths vary; layout scrolls horizontally past screen
@@ -80,11 +85,17 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
      to `jq`/similar to parse the JSON one. Decide when the sketchybar
      item is built, not blocking on it now.
 - **Hidden windows stay in `window_list`.** Do not remove a window from the
-  list when it's minimized for a workspace switch. `tileWorkspace()` simply
-  skips windows that are currently minimized/not visible when computing
-  frames. Only remove a window from the list when it's actually destroyed
-  (`windowDestroyed`), or explicitly moved to another workspace, or made
-  floating.
+  list when it's minimized for a workspace switch. Only remove a window
+  from the list when it's actually destroyed (`windowDestroyed`), or
+  explicitly moved to another workspace, or made floating.
+
+  Tiling skips them: `tiling.lua`'s `visible_columns()` projects a
+  screen's strip down to just the windows that are on screen right now,
+  preserving column indices so an anchor's `col` stays meaningful. A
+  minimized window left in the layout math would claim a share of its
+  column's height, and a fully hidden column would leave a gap that
+  shifts every column to its right. A hidden window can't serve as a
+  tiling anchor either (`canAnchor` / `getFirstVisibleWindow`).
 - **Per-window (not per-app) assignment rules**, evaluated at window
   creation against app name + window title using Lua patterns:
   ```lua
@@ -94,11 +105,19 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
     { app = "Zen Browser", workspace = 1 }, -- fallback for that app
   }
   ```
-  First matching rule wins; no match → assign to `current_workspace` at
-  creation time. Optional nice-to-have: also re-run rules on
-  `windowTitleChanged` (hs.window.filter supports this event) so windows
-  can be reassigned dynamically as their title changes, not just once at
-  creation — this is a step beyond what AeroSpace/FlashSpace do.
+  First matching rule wins. `Rules.assign` returns **nil** when nothing
+  matched — the fallback belongs to the caller, because the two callers
+  need different behaviour:
+  - `windows.addWindow` falls back to `current_workspace`: a brand new
+    window with no rule does belong on whatever workspace is active.
+  - the `windowTitleChanged` handler does **not** fall back: it only acts
+    on an explicit match. Rules are re-run on title change (a step beyond
+    what AeroSpace/FlashSpace do) so a window can follow its own title
+    between workspaces, but a non-match must leave the window exactly
+    where it is. Folding the fallback into `assign` made every retitle of
+    an already-tracked window — a browser switching tabs, a shell changing
+    directory — look like a match for the active workspace and drag the
+    window out of the workspace it was living on.
 - **Floating windows are assigned to a workspace** (hidden/shown with it
   when switching), they're just excluded from tiling math — same as
   PaperWM's `is_floating` set, but tag each entry with its owning
@@ -122,24 +141,63 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
   window to the next connected screen, keeping its workspace.
 
   Off-viewport columns (ones scrolled past a screen's own edge) are
-  **minimized**, not positioned off-canvas via coordinates. Confirmed
-  live: macOS always clamps a window's frame back to overlap the nearest
-  connected screen, no matter how far off-canvas `setFrame()` tries to
-  push it — there's no x-coordinate that's genuinely invisible once the
-  desktop has monitor coverage in that direction (this was a real, if
-  previously unnoticed, gap in single-monitor mode too — the same
-  clamping left a small sliver visible at the screen edge; a second
-  monitor just turns that sliver into most of a window). `focusWindow()`
-  (windows.lua) explicitly retiles after `:focus()` rather than relying
-  solely on the `windowFocused` AX event — confirmed live that focusing a
-  minimized window unminimizes it via macOS directly without reliably
-  firing that notification afterward.
+  positioned off-canvas via coordinates (clamped to `right_margin`/
+  `left_margin`), same as before multi-monitor support — **not**
+  minimized. An earlier revision of this Spoon minimized off-viewport
+  columns instead, reasoning that macOS clamps a window's frame back onto
+  the nearest connected screen so coordinate placement leaves a visible
+  sliver at the edge. That's true, but it made ordinary horizontal
+  scrolling within a workspace visibly minimize/unminimize windows
+  (Dock genie animation, Dock icon churn) on every scroll step, including
+  on a single monitor where there's no adjacent screen for a sliver to
+  bleed onto — a worse trade than the sliver itself. Reverted deliberately
+  (user call, 2026-08-17): off-canvas coordinate clamping is back for
+  overflow columns on **every** screen count, accepting the known
+  limitation that on genuinely adjacent multi-monitor setups a column
+  clamped to one screen's edge can show a visible sliver on the
+  neighboring screen — that's considered preferable to minimize-based
+  scrolling. Full-workspace hide/show (`switchWorkspace`) and the
+  scratchpad still use `minimize()`/`unminimize()` — that part is
+  unaffected and not in question.
 
   A monitor disconnecting merges its windows onto the primary screen
   (`State.reconcileScreens()`, called from `events.lua`'s screen_watcher)
   rather than stranding them until that exact display reconnects; a
   monitor not connected at load time gets the same treatment in
   `State.load()` via `State.resolveScreen()`.
+
+## Module layout
+
+Same split as PaperWM.spoon, so the two stay diffable:
+
+| ScrollSpace | PaperWM | contents |
+| --- | --- | --- |
+| `init.lua` | `init.lua` | metadata, module loading, `start`/`stop`/`tileWorkspace`/`bindHotkeys` |
+| `config.lua` | `config.lua` | defaults applied onto the Spoon table |
+| `state.lua` | `state.lua` | `window_list`/`index_table`/watchers/`x_positions` behind proxy tables, plus JSON persistence |
+| `windows.lua` | `windows.lua` | window-list surgery (`addWindow`/`removeWindow`/`refreshWindows`) and per-window commands (focus/swap/center/cycle/slurp/barf/`moveWindow`) |
+| `workspace.lua` | `space.lua` | switching (`switchWorkspace`), moving windows between workspaces and screens |
+| `tiling.lua` | `tiling.lua` | `tileColumn` / `tileWorkspace` |
+| `events.lua` | `events.lua` | window filter subscriptions, screen and app watchers |
+| `actions.lua` | `actions.lua` | hotkey-bindable action spec |
+| `floating.lua` | `floating.lua` | the floating layer |
+| `rules.lua` | — | per-window workspace assignment rules |
+| `scratchpad.lua` | — | the single global scratchpad window |
+| `spec/` | `spec/` | busted specs against a mocked `hs` namespace |
+
+`hs.spaces`, Mission Control, and swipe/drag/scroll gestures have no
+counterpart here — `mission_control.lua`, `space_tracker.lua` and
+`swipe.lua` are deliberately absent.
+
+## Tests
+
+`spec/` mirrors PaperWM's: busted specs over `spec/mocks.lua`, a stand-in
+`hs` namespace. `spec/spec_helper.lua` loads every module against the
+mocks and exposes `H.reset()` for `before_each`. Run from this directory:
+
+```
+busted spec/
+```
 
 ## Features to implement
 

@@ -9,225 +9,9 @@ function Workspace.init(scrollspace)
     Workspace.ScrollSpace = scrollspace
 end
 
----add a new window to be tracked and automatically tiled. Assigns a
----workspace via Rules.assign unless `workspace` is given explicitly (used
----when re-inserting a window that already had a known workspace, e.g.
----un-floating -- re-running rules there could send it somewhere other than
----where it was floating). Screen defaults to wherever the window actually
----is (add_window:screen()) unless given explicitly -- a workspace spans
----every connected screen, each with its own independent column strip.
----Windows assigned to a workspace other than the currently active one are
----minimized immediately so they don't appear on screen while some other
----workspace is showing.
----@param add_window Window new window to be added
----@param workspace number|nil explicit target workspace, skips Rules.assign
----@param screen string|nil explicit target screen (hs.screen:getUUID()), skips add_window:screen()
----@return number|nil workspace that contains the new window
-function Workspace.addWindow(add_window, workspace, screen)
-    local state = Workspace.ScrollSpace.state
-
-    -- A window with no tabs will have a tabCount of 0 or 1. Built-in Apple
-    -- apps like Finder/Terminal show each tab as a separate window that
-    -- can't be told apart from a real window after creation -- same quirk
-    -- PaperWM works around.
-    local apple <const> = "com.apple"
-    local safari <const> = "com.apple.Safari"
-    local app = add_window:application()
-    local bundle_id = app and app:bundleID()
-    if add_window:tabCount() > 1 and bundle_id
-        and bundle_id:sub(1, #apple) == apple
-        and bundle_id:sub(1, #safari) ~= safari then
-        hs.notify.show("ScrollSpace", "Windows with tabs are not supported!", "")
-        Workspace.ScrollSpace.logger.w("ignoring window with tabs: " .. add_window:title())
-        return
-    end
-
-    if not add_window:isMaximizable() then
-        Workspace.ScrollSpace.logger.d("ignoring non-maximizable window")
-        return
-    end
-
-    -- defensive second layer against picture-in-picture windows, on top of
-    -- window_filter's allowRoles -- PiP windows are always static/global,
-    -- never tracked/tiled/minimized
-    local subrole = add_window:subrole()
-    if subrole and Workspace.ScrollSpace.pip_subroles[subrole] then
-        Workspace.ScrollSpace.logger.d("ignoring picture-in-picture window (subrole: " .. subrole .. ")")
-        return
-    end
-
-    -- already tracked, tiled or floating
-    if state.windowIndex(add_window) or Workspace.ScrollSpace.floating.isFloating(add_window) then
-        return
-    end
-
-    workspace = workspace or Workspace.ScrollSpace.rule_engine.assign(add_window)
-    screen = screen or add_window:screen():getUUID()
-
-    -- find where to insert window (within this screen's own column list --
-    -- a workspace spans every connected screen, each tiling independently)
-    local add_column = 1
-    local prev_focused_index = state.prev_focused_window and state.windowIndex(state.prev_focused_window)
-    if prev_focused_index and prev_focused_index.workspace == workspace and prev_focused_index.screen == screen and
-        (state.prev_focused_window:id() ~= add_window:id()) then
-        add_column = prev_focused_index.col + 1
-    else
-        local x = add_window:frame().center.x
-        for col, windows in ipairs(state.windowList(workspace, screen)) do
-            if x < windows[1]:frame().center.x then
-                add_column = col
-                break
-            else
-                add_column = col + 1
-            end
-        end
-    end
-
-    table.insert(state.windowList(workspace, screen), add_column, { add_window })
-    state.uiWatcherCreate(add_window)
-
-    Workspace.ScrollSpace.logger.df("adding window: %s (%d) to workspace %d, screen %s", add_window:title(),
-        add_window:id(), workspace, screen)
-
-    if workspace ~= state.current_workspace then
-        add_window:minimize()
-    end
-
-    return workspace
-end
-
----remove a window from being tracked and automatically tiled
----@param remove_window Window window to be removed
----@param skip_new_window_focus boolean|nil don't focus a nearby window if true
----@return number|nil workspace that contained removed window
----@return Window|nil newly focused window
-function Workspace.removeWindow(remove_window, skip_new_window_focus)
-    local state = Workspace.ScrollSpace.state
-    local remove_index = state.windowIndex(remove_window, true)
-    if not remove_index then
-        return
-    end
-
-    local focused_window = nil
-    if not skip_new_window_focus then
-        local Direction = Workspace.ScrollSpace.windows.Direction
-        for _, direction in ipairs({ Direction.DOWN, Direction.UP, Direction.LEFT, Direction.RIGHT }) do
-            focused_window = Workspace.ScrollSpace.windows.focusWindow(direction, remove_index)
-            if focused_window then break end
-        end
-    end
-
-    if remove_window ~=
-        table.remove(state.windowList(remove_index.workspace, remove_index.screen, remove_index.col), remove_index.row) then
-        Workspace.ScrollSpace.logger.ef("removed window %s (%d) doesn't match", remove_window:title(),
-            remove_window:id())
-    end
-
-    state.uiWatcherDelete(remove_window:id())
-    state.xPositions(remove_index.workspace, remove_index.screen)[remove_window:id()] = nil
-
-    if state.prev_focused_window == remove_window then
-        state.prev_focused_window = nil
-    end
-
-    Workspace.ScrollSpace.logger.df("removing window: %s (%d)", remove_window:title(), remove_window:id())
-
-    return remove_index.workspace, focused_window
-end
-
----get all managed windows and retile any workspace that gained one
-function Workspace.refreshWindows()
-    local state = Workspace.ScrollSpace.state
-    state.pruneDead()
-
-    -- hs.window.allWindows(), not window_filter:getWindows() -- the
-    -- latter only returns currently-visible windows, which would miss
-    -- any minimized-but-untracked window entirely (e.g. one orphaned by
-    -- a past bug, or an app that starts out minimized).
-    local all_windows = hs.window.allWindows()
-
-    -- isWindowAllowed(window) is unreliable on its own -- confirmed live
-    -- (2026-08-14) that it can return false for a window that is visible,
-    -- eligible, and even present in this exact window_filter's own
-    -- getWindows() output moments earlier (a kitty.main window survived a
-    -- theme-change-triggered prune/re-add and came back with a new
-    -- CGWindowID; isWindowAllowed refused to ever let it back into
-    -- tracking, permanently breaking that workspace's tiling until fixed
-    -- by hand). getWindows() membership is the trustworthy signal for any
-    -- currently-visible window since it's the same list events.lua's own
-    -- subscriptions are built from.
-    local visible_allowed = {}
-    for _, window in ipairs(Workspace.ScrollSpace.window_filter:getWindows()) do
-        visible_allowed[window:id()] = true
-    end
-
-    local retile_workspaces = {}
-    for _, window in ipairs(all_windows) do
-        -- the scratchpad window is deliberately kept out of index_table
-        -- too (not a workspace member, see scratchpad.lua) -- without
-        -- this check it looks exactly like an untracked window and
-        -- would get pulled back into a workspace's tiling. Pre-existing
-        -- gap, not new: it could already trigger whenever the
-        -- scratchpad window was visible, this change just makes it far
-        -- more likely to hit (minimized scratchpad windows are now in
-        -- scope too via allWindows()).
-        if window:id() ~= state.scratchpad
-            and not Workspace.ScrollSpace.floating.isFloating(window)
-            and not state.windowIndex(window) then
-            local allowed = visible_allowed[window:id()]
-            if not allowed then
-                -- isAppAllowed() is a cheap, visibility-independent
-                -- pre-check -- confirmed live this is required, not
-                -- optional: without it, EVERY minimized window belonging
-                -- to a fully app-rejected app (Finder, System Settings --
-                -- see the setAppFilter calls) got unminimized then
-                -- immediately re-minimized below on every refreshWindows()
-                -- call (i.e. every reload), a visible open/close flicker
-                -- for a window that was never going to pass
-                -- isWindowAllowed regardless of visibility. Confirmed live:
-                -- two minimized Finder windows flickering open/closed on
-                -- every reload, including the automatic one on wake.
-                local app = window:application()
-                if app and Workspace.ScrollSpace.window_filter:isAppAllowed(app:name()) then
-                    -- config.lua's window_filter has a blanket
-                    -- `visible = true` override criterion, so
-                    -- isWindowAllowed() can NEVER return true for a
-                    -- minimized window -- not flakiness, structural.
-                    -- Minimized-and-untracked is exactly the orphan case
-                    -- this function exists to recover (confirmed live: a
-                    -- minimized, untracked Thunderbird window stayed stuck
-                    -- invisible forever, even after switching to its
-                    -- workspace, because this function could never
-                    -- reclaim it). Unminimize briefly to get a real
-                    -- verdict out of the filter's actual per-window title
-                    -- rules, then put it back if it turns out not to
-                    -- belong here after all -- addWindow() below already
-                    -- re-minimizes it correctly if it belongs to a
-                    -- non-active workspace, so no cleanup is needed on the
-                    -- "allowed" path.
-                    local was_minimized = window:isMinimized()
-                    if was_minimized then window:unminimize() end
-                    allowed = Workspace.ScrollSpace.window_filter:isWindowAllowed(window)
-                    if was_minimized and not allowed then window:minimize() end
-                end
-            end
-            if allowed then
-                local workspace = Workspace.addWindow(window)
-                if workspace then retile_workspaces[workspace] = true end
-            end
-        end
-    end
-
-    for workspace, _ in pairs(retile_workspaces) do
-        Workspace.ScrollSpace:tileWorkspace(workspace)
-    end
-
-    state.save()
-end
-
 ---minimize every window (tiled + floating) belonging to a workspace
 ---@param workspace number
-local function hideWorkspace(workspace)
+local function hide_workspace(workspace)
     local state = Workspace.ScrollSpace.state
     for _, columns in pairs(state.windowList(workspace)) do
         for _, column in ipairs(columns) do
@@ -246,7 +30,7 @@ end
 
 ---unminimize every window (tiled + floating) belonging to a workspace
 ---@param workspace number
-local function showWorkspace(workspace)
+local function show_workspace(workspace)
     local state = Workspace.ScrollSpace.state
     for _, columns in pairs(state.windowList(workspace)) do
         for _, column in ipairs(columns) do
@@ -283,22 +67,34 @@ function Workspace.switchWorkspace(n)
         end
     end
 
-    hideWorkspace(previous)
+    hide_workspace(previous)
     state.current_workspace = n
-    showWorkspace(n)
+    show_workspace(n)
 
     Workspace.ScrollSpace:tileWorkspace(n)
 
     local last_window = state.last_focused[n] and Window.get(state.last_focused[n])
-    if last_window then
+    if last_window and not last_window:isMinimized() then
         last_window:focus()
     else
-        for _, columns in pairs(state.windowList(n)) do
-            if columns[1] and columns[1][1] then
-                columns[1][1]:focus()
-                break
+        -- no remembered window: fall back to the leftmost column of the
+        -- main screen's strip, then any other screen. pairs() order over
+        -- the screen buckets is arbitrary, so pick the main screen
+        -- explicitly rather than landing on a random monitor
+        local main_screen = hs.screen.mainScreen()
+        local preferred = main_screen and main_screen:getUUID()
+        local fallback = nil
+        for screen_uuid, columns in pairs(state.windowList(n)) do
+            local window = columns[1] and columns[1][1]
+            if window and not window:isMinimized() then
+                if screen_uuid == preferred then
+                    fallback = window
+                    break
+                end
+                fallback = fallback or window
             end
         end
+        if fallback then fallback:focus() end
     end
 
     state.save()
@@ -307,8 +103,8 @@ end
 ---move a window to another workspace: list surgery only (remove from its
 ---current column, insert as a new column at the end of the target
 ---workspace's list, on the SAME screen it was already on), keeping its
----uielement watcher alive. Minimizes the window if the target workspace
----isn't the active one.
+---uielement watcher alive. The window's minimized state is then matched
+---to whether the target workspace is the active one.
 ---@param window Window|nil defaults to the focused window
 ---@param n number target workspace id
 function Workspace.moveWindowToWorkspace(window, n)
@@ -336,6 +132,9 @@ function Workspace.moveWindowToWorkspace(window, n)
     end
 
     if n == current then
+        -- moving onto the active workspace: the window may have been
+        -- hidden with the workspace it came from, so show it again
+        if window:isMinimized() then window:unminimize() end
         Workspace.ScrollSpace:tileWorkspace(n)
     else
         window:minimize()
@@ -364,7 +163,8 @@ function Workspace.moveWindowToNextScreen(window)
     local state = Workspace.ScrollSpace.state
     local index = state.windowIndex(window)
     if not index then
-        Workspace.ScrollSpace.logger.d("window is not tiled (floating/scratchpad windows don't have a screen to move between)")
+        Workspace.ScrollSpace.logger.d(
+            "window is not tiled (floating/scratchpad windows don't have a screen to move between)")
         return
     end
 
