@@ -86,8 +86,38 @@ function Events.windowEventHandler(window, event, self)
         self.state.prev_focused_window = window -- for addWindow() insertion point
         local index = self.state.windowIndex(window)
         if index then
-            workspace, anchor_window = index.workspace, window
+            -- set before the switch below: switchWorkspace() focuses the
+            -- target workspace's last_focused window, so recording this
+            -- one first makes it land back on exactly the window that was
+            -- just focused rather than whatever was focused there before.
             self.state.last_focused[index.workspace] = window:id()
+
+            -- Something outside ScrollSpace -- a Dock icon, a notification,
+            -- cmd-tab, an `open -a` or URL handler -- can focus a window
+            -- living on a workspace we're not currently on. macOS just
+            -- unminimizes it in place, so it lands on top of the active
+            -- workspace's strip: one stray window overlaying a layout it
+            -- isn't part of, and nothing re-minimizes it until the next
+            -- manual switch. Follow the window to its own workspace
+            -- instead.
+            --
+            -- Re-entrancy is safe. The minimize()/unminimize() storm this
+            -- kicks off re-enters this handler as windowNotVisible (a
+            -- no-op branch) and windowVisible (early-returns for windows
+            -- already in index_table, which all of these are), and
+            -- switchWorkspace's closing focus() call re-enters as
+            -- windowFocused for `window`, which the prev_focused_window
+            -- guard above has already claimed.
+            if index.workspace ~= self.state.current_workspace then
+                self.logger.df("following externally focused window to workspace %d", index.workspace)
+                self.workspace.switchWorkspace(index.workspace)
+            end
+
+            -- falls through to the tileWorkspace() at the bottom with this
+            -- window as the anchor, so a window that was scrolled off its
+            -- strip's viewport is scrolled back into view rather than
+            -- being focused somewhere off-canvas
+            workspace, anchor_window = index.workspace, window
         end
     elseif event == "windowVisible" or event == "windowUnfullscreened" then
         if self.state.windowIndex(window) then

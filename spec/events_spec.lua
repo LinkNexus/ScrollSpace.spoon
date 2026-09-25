@@ -102,5 +102,58 @@ describe("ScrollSpace.events", function()
             fire(win, "windowFocused")
             assert.are.equal(1, State.last_focused[1])
         end)
+
+        -- a Dock icon, a notification, cmd-tab or an `open -a` can focus a
+        -- window living on an inactive workspace; macOS unminimizes it in
+        -- place, so without this it lands on top of the active workspace's
+        -- strip and nothing re-minimizes it until the next manual switch
+        it("follows an externally focused window to its own workspace", function()
+            State.current_workspace = 1
+            local here = mock_window(1, "shell")
+            local there = mock_window(2, "chat")
+            Windows.addWindow(here, 1)
+            Windows.addWindow(there, 2)
+            assert.is_true(there:isMinimized())
+
+            there:unminimize() -- what the Dock click itself does
+            fire(there, "windowFocused")
+
+            assert.are.equal(2, State.current_workspace)
+            assert.is_true(here:isMinimized())
+            assert.is_false(there:isMinimized())
+            assert.are.equal(2, State.last_focused[2])
+        end)
+
+        it("leaves the outgoing workspace's last_focused intact", function()
+            State.current_workspace = 1
+            local here = mock_window(1, "shell")
+            local there = mock_window(2, "chat")
+            Windows.addWindow(here, 1)
+            Windows.addWindow(there, 2)
+            fire(here, "windowFocused")
+            assert.are.equal(1, State.last_focused[1])
+
+            State.prev_focused_window = nil
+            there:unminimize()
+            fire(there, "windowFocused")
+
+            -- switching back to 1 must still restore the window that was
+            -- actually in use there, not the one that pulled us away
+            assert.are.equal(1, State.last_focused[1])
+        end)
+
+        it("does not switch for a window already on the active workspace", function()
+            State.current_workspace = 1
+            local a = mock_window(1, "a")
+            local b = mock_window(2, "b")
+            Windows.addWindow(a, 1)
+            Windows.addWindow(b, 1)
+
+            fire(b, "windowFocused")
+
+            assert.are.equal(1, State.current_workspace)
+            assert.is_false(a:isMinimized())
+            assert.is_false(b:isMinimized())
+        end)
     end)
 end)
