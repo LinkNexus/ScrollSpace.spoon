@@ -68,10 +68,17 @@ function M.mock_window(id, title, frame, opts)
         tabCount = function() return 0 end,
         isMaximizable = function() return true end,
         subrole = function() return opts.subrole or "AXStandardWindow" end,
+        isStandard = function() return (opts.subrole or "AXStandardWindow") == "AXStandardWindow" end,
         newWatcher = function()
             return { start = function() end, stop = function() end }
         end,
-        focus = function() M.focused_window = window end,
+        -- focus_order records every focus() call in order, so specs can
+        -- assert on which window was raised last (floating.focusFloating
+        -- focuses the whole layer in turn, target last)
+        focus = function()
+            M.focused_window = window
+            table.insert(M.focus_order, id)
+        end,
         -- takes self explicitly: every hs.window call site uses method
         -- syntax, so a one-parameter setFrame would silently bind the
         -- window itself as the frame
@@ -136,6 +143,7 @@ end
 function M.init_mocks()
     M.windows = {}
     M.focused_window = nil
+    M.focus_order = {}
     M.screens = {
         screen_a = M.mock_screen("screen_a", 0),
         screen_b = M.mock_screen("screen_b", 1000),
@@ -169,6 +177,14 @@ function M.init_mocks()
             allWindows = function()
                 local out = {}
                 for _, w in pairs(M.windows) do table.insert(out, w) end
+                table.sort(out, function(a, b) return a:id() < b:id() end)
+                return out
+            end,
+            visibleWindows = function()
+                local out = {}
+                for _, w in pairs(M.windows) do
+                    if not w:isMinimized() then table.insert(out, w) end
+                end
                 table.sort(out, function(a, b) return a:id() < b:id() end)
                 return out
             end,

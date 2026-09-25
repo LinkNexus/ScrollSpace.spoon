@@ -38,6 +38,75 @@ describe("ScrollSpace.floating", function()
         end)
     end)
 
+    describe("focusFloating", function()
+        it("raises the whole floating layer, leaving the target focused last", function()
+            State.current_workspace = 1
+            local tiled = mock_window(1, "tiled")
+            local floater_a = mock_window(2, "floater a")
+            local floater_b = mock_window(3, "floater b")
+            Windows.addWindow(tiled, 1)
+            State.is_floating[2] = 1
+            State.is_floating[3] = 1
+            Mocks.focused_window = tiled
+            Mocks.focus_order = {}
+
+            local target = Floating.focusFloating()
+
+            assert.are.equal(floater_a, target)
+            -- both raised, target last so it ends up on top of the layer
+            assert.are.same({ 3, 2 }, Mocks.focus_order)
+            assert.are.equal(floater_a, Mocks.focused_window)
+        end)
+
+        it("cycles to the next floating window when one is already focused", function()
+            State.current_workspace = 1
+            local floater_a = mock_window(1, "floater a")
+            local floater_b = mock_window(2, "floater b")
+            State.is_floating[1] = 1
+            State.is_floating[2] = 1
+
+            Mocks.focused_window = nil
+            assert.are.equal(floater_a, Floating.focusFloating())
+            assert.are.equal(floater_b, Floating.focusFloating())
+            -- wraps back around to the start of the layer
+            assert.are.equal(floater_a, Floating.focusFloating())
+        end)
+
+        it("skips floating windows hidden with another workspace", function()
+            State.current_workspace = 1
+            local here = mock_window(1, "here")
+            local elsewhere = mock_window(2, "elsewhere", nil, { minimized = true })
+            State.is_floating[1] = 1
+            State.is_floating[2] = 2
+
+            assert.are.equal(here, Floating.focusFloating())
+        end)
+
+        it("includes visible windows ScrollSpace doesn't track at all", function()
+            -- window_filter exclusions (Finder, System Settings) are never
+            -- tiled and never minimized -- they float in practice, and
+            -- focusWindow can't reach them since they aren't in window_list
+            State.current_workspace = 1
+            local tiled = mock_window(1, "tiled")
+            local untracked = mock_window(2, "Finder", nil, { app = "Finder" })
+            Windows.addWindow(tiled, 1)
+            Mocks.focused_window = tiled
+
+            assert.are.equal(untracked, Floating.focusFloating())
+        end)
+
+        it("leaves picture-in-picture panels and the scratchpad alone", function()
+            State.current_workspace = 1
+            mock_window(1, "PiP", nil, { subrole = "AXSystemFloatingWindow" })
+            mock_window(2, "scratch")
+            State.scratchpad = 2
+            Mocks.focus_order = {}
+
+            assert.is_nil(Floating.focusFloating())
+            assert.are.same({}, Mocks.focus_order)
+        end)
+    end)
+
     describe("scratchpad", function()
         it("lives outside window_list and index_table entirely", function()
             local win = mock_window(1, "scratch")

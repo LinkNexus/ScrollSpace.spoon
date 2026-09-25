@@ -31,6 +31,7 @@ function Actions.actions()
         slurp_in = Actions.ScrollSpace.windows.slurpWindow,
         barf_out = Actions.ScrollSpace.windows.barfWindow,
         toggle_floating = Actions.ScrollSpace.floating.toggleFloating,
+        focus_floating = Actions.ScrollSpace.floating.focusFloating,
         move_window_to_next_screen = Actions.ScrollSpace.workspace.moveWindowToNextScreen,
         toggle_scratchpad = Actions.ScrollSpace.scratchpad.toggleScratchpad,
         set_scratchpad = Actions.ScrollSpace.scratchpad.setScratchpad,

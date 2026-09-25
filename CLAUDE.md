@@ -122,6 +122,27 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
   when switching), they're just excluded from tiling math — same as
   PaperWM's `is_floating` set, but tag each entry with its owning
   workspace id so switching hides/shows it correctly.
+
+  Because they're outside `window_list`, a tiled window laid over the same
+  area simply covers them and `focusWindow` can't dig them back out — it
+  only walks `window_list`. `focusFloating()` (ported from PaperWM's
+  action of the same name) is the way back: it focuses every floating
+  window of the current workspace in turn, which activates each one's app
+  and pulls the whole layer above the tiled strip, focusing its target
+  last so that window ends up on top. Focusing each one rather than
+  `window:raise()` is deliberate — `raise()` only reorders within the
+  window's own app, so it can't lift a background app's window above the
+  frontmost app's. Repeated calls cycle through the layer (window id
+  order), so the hotkey walks it instead of toggling between two windows.
+
+  `focusFloating`'s idea of "floating" is deliberately wider than
+  `is_floating`: it also picks up visible windows ScrollSpace doesn't
+  track at all (anything excluded at the `window_filter` level, e.g.
+  Finder / System Settings in the parent config). Those are never tiled
+  and never minimized by a switch, so they float in practice, and nothing
+  else in the keyboard surface can reach them. Excluded from that second
+  group: the scratchpad (it has its own toggle), PiP panels (per the
+  always-global rule below), and non-standard windows.
 - **Scratchpad**: a single window (or small set) invocable from *any*
   workspace regardless of which one is active. Lives entirely outside
   `window_list`/`index_table` — not a workspace member, not tiled. Toggle
@@ -217,13 +238,15 @@ busted spec/
 5. **Resize cycling**: `cycleWindowSize` through `window_ratios` — port
    from PaperWM. Slurp/barf (move window into/out of adjacent column) is
    nice-to-have, can be added after the core works.
-6. **Floating toggle**: `toggleFloating()` on focused window.
+6. **Floating toggle**: `toggleFloating()` on focused window, plus
+   `focusFloating()` to bring the floating layer back above the tiled
+   strip (see the floating bullet above).
 7. **Scratchpad**: `setScratchpad()` (assign focused window as scratchpad,
    remove from its workspace/floating tracking, minimize it),
    `toggleScratchpad()`.
 8. **Hotkeys**: `switch_workspace_1..9`, `move_window_1..9`,
    `focus_left/right/up/down`, `swap_left/right/up/down`, `cycle_width`,
-   `toggle_floating`, `toggle_scratchpad`, `set_scratchpad`,
+   `toggle_floating`, `focus_floating`, `toggle_scratchpad`, `set_scratchpad`,
    `center_window`, `full_width`, `refresh_windows`, `stop_events` — same
    naming convention as PaperWM's `default_hotkeys` table for familiarity.
 
