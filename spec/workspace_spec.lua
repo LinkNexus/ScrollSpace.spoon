@@ -98,11 +98,17 @@ describe("ScrollSpace.workspace", function()
             assert.is_false(win:isMinimized())
         end)
 
-        it("keeps the window on the screen it was already on", function()
+        it("keeps the window on the strip it was already on", function()
+            -- stacked, so screen_b is its own strip and "stayed put" is
+            -- actually observable
+            Mocks.set_screens({
+                { uuid = "screen_a", x = 0, y = 0, h = 800 },
+                { uuid = "screen_b", x = 0, y = 800, h = 800 },
+            })
             local win = mock_window(1, "shell", nil, { screen = "screen_b" })
             Windows.addWindow(win, 1)
             Workspace.moveWindowToWorkspace(win, 2)
-            assert.are.equal("screen_b", State.windowIndex(win).screen)
+            assert.are.equal("screen_b", State.windowIndex(win).strip)
         end)
 
         it("retags a floating window instead of tiling it", function()
@@ -118,32 +124,53 @@ describe("ScrollSpace.workspace", function()
         end)
     end)
 
-    describe("moveWindowToNextScreen", function()
-        it("cycles the focused window to the next screen, keeping its workspace", function()
+    describe("moveWindowToNextStrip", function()
+        ---two displays stacked vertically, i.e. two separate strips --
+        ---the only arrangement where "next strip" means anything
+        local function stacked()
+            Mocks.set_screens({
+                { uuid = "screen_a", x = 0, y = 0, h = 800 },
+                { uuid = "screen_b", x = 0, y = 800, h = 800 },
+            })
+        end
+
+        it("cycles the focused window to the next strip, keeping its workspace", function()
+            stacked()
             local win = mock_window(1, "shell", nil, { screen = "screen_a" })
             Windows.addWindow(win, 1)
             Mocks.focused_window = win
 
-            Workspace.moveWindowToNextScreen(win)
+            Workspace.moveWindowToNextStrip(win)
 
             local index = State.windowIndex(win)
-            assert.are.equal("screen_b", index.screen)
+            assert.are.equal("screen_b", index.strip)
             assert.are.equal(1, index.workspace)
         end)
 
-        it("wraps around from the last screen back to the first", function()
+        it("wraps around from the last strip back to the first", function()
+            stacked()
             local win = mock_window(1, "shell", nil, { screen = "screen_b" })
             Windows.addWindow(win, 1)
-            Workspace.moveWindowToNextScreen(win)
-            assert.are.equal("screen_a", State.windowIndex(win).screen)
+            Workspace.moveWindowToNextStrip(win)
+            assert.are.equal("screen_a", State.windowIndex(win).strip)
         end)
 
-        it("does nothing with a single screen connected", function()
-            Mocks.connected = { "screen_a" }
+        it("does nothing with a single display connected", function()
+            Mocks.set_screens({ { uuid = "screen_a", x = 0 } })
             local win = mock_window(1, "shell")
             Windows.addWindow(win, 1)
-            Workspace.moveWindowToNextScreen(win)
-            assert.are.equal("screen_a", State.windowIndex(win).screen)
+            Workspace.moveWindowToNextStrip(win)
+            assert.are.equal("screen_a", State.windowIndex(win).strip)
+        end)
+
+        it("does nothing when the displays all form one side-by-side strip", function()
+            -- there is nowhere to move the window to: the strip already
+            -- flows across both displays, so scrolling it is what puts a
+            -- window on the next display over
+            local win = mock_window(1, "shell", nil, { screen = "screen_a" })
+            Windows.addWindow(win, 1)
+            Workspace.moveWindowToNextStrip(win)
+            assert.are.equal("screen_a", State.windowIndex(win).strip)
         end)
     end)
 end)

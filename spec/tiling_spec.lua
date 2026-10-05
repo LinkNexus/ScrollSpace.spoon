@@ -83,18 +83,92 @@ describe("ScrollSpace.tiling", function()
             assert.are.equal(116, c:frame().x)
         end)
 
-        it("tiles each screen's strip independently", function()
+        it("flows one strip continuously across side-by-side displays", function()
+            -- the default arrangement is two flush 1000pt displays, so the
+            -- column sequence continues across the boundary instead of
+            -- each display starting its own strip: b lands right after a
+            -- on the FIRST display, not at the second display's origin
             local a = mock_window(1, "a", { x = 0, y = 0, w = 100, h = 100 }, { screen = "screen_a" })
-            -- b is bucketed to screen_b but sitting at screen_a's origin;
-            -- tiling should pull it onto its own screen's canvas
             local b = mock_window(2, "b", { x = 0, y = 0, w = 100, h = 100 }, { screen = "screen_b" })
             Windows.addWindow(a, 1); Windows.addWindow(b, 1)
             Mocks.focused_window = a
 
             Tiling.tileWorkspace(1)
 
-            assert.are.equal(8, a:frame().x)    -- screen_a canvas starts at 8
-            assert.are.equal(1008, b:frame().x) -- screen_b canvas starts at 1008
+            assert.are.equal(8, a:frame().x)   -- strip starts at the first canvas
+            assert.are.equal(116, b:frame().x) -- 8 + 100 wide + 8 gap
+        end)
+
+        it("never lets a column straddle two displays", function()
+            -- a is wide enough that the next column would cross the bezel
+            -- at x=992 (screen_a's canvas edge), so b starts at screen_b's
+            -- canvas origin instead, leaving the slack as dead space
+            local a = mock_window(1, "a", { x = 8, y = 0, w = 900, h = 100 }, { screen = "screen_a" })
+            local b = mock_window(2, "b", { x = 1000, y = 0, w = 200, h = 100 }, { screen = "screen_b" })
+            Windows.addWindow(a, 1); Windows.addWindow(b, 1)
+            Mocks.focused_window = a
+
+            Tiling.tileWorkspace(1)
+
+            assert.are.equal(908, a:frame().x2)  -- a ends well short of 992
+            assert.are.equal(1008, b:frame().x)  -- pushed to the next canvas
+        end)
+
+        it("flows leftward across the bezel instead of parking at an interior edge", function()
+            -- the bug this feature fixes: with per-display strips, a column
+            -- scrolled off the left of the second display got parked 1pt
+            -- inside THAT display's left edge, which put almost the whole
+            -- window on the first display. It should simply continue the
+            -- strip onto the first display instead.
+            local a = mock_window(1, "a", { x = 0, y = 0, w = 900, h = 100 }, { screen = "screen_a" })
+            local anchor_win = mock_window(2, "b", { x = 1008, y = 0, w = 900, h = 100 }, { screen = "screen_b" })
+            Windows.addWindow(a, 1); Windows.addWindow(anchor_win, 1)
+            Mocks.focused_window = anchor_win
+
+            Tiling.tileWorkspace(1)
+
+            -- 992 (first canvas's right edge) - 900 wide
+            assert.are.equal(92, a:frame().x)
+        end)
+
+        it("parks a column scrolled off the strip at the strip's outer edge", function()
+            -- only once a column runs off the END of the whole strip does it
+            -- get parked off-canvas, and then at the strip's outer margin
+            -- (first display's left edge + screen_margin), where there is no
+            -- other display for it to bleed onto
+            local p1 = mock_window(1, "p", { x = 0, y = 0, w = 900, h = 100 })
+            local p2 = mock_window(2, "q", { x = 0, y = 0, w = 900, h = 100 })
+            local p3 = mock_window(3, "r", { x = 0, y = 0, w = 900, h = 100 })
+            local anchor_win = mock_window(4, "anchor", { x = 1008, y = 0, w = 900, h = 100 })
+            local strip = State.windowList(1, "screen_a")
+            strip[1] = { p1 }
+            strip[2] = { p2 }
+            strip[3] = { p3 }
+            strip[4] = { anchor_win }
+            Mocks.focused_window = anchor_win
+
+            Tiling.tileWorkspace(1)
+
+            assert.are.equal(92, p3:frame().x)    -- still flowing, on display one
+            assert.are.equal(1, p1:frame().x2)    -- parked at the strip's left margin
+        end)
+
+        it("tiles vertically stacked displays as separate strips", function()
+            -- stacked displays get one strip each, so each tiles to its own
+            -- vertical canvas rather than flowing across the bezel
+            Mocks.set_screens({
+                { uuid = "screen_a", x = 0, y = 0, h = 800 },
+                { uuid = "screen_b", x = 0, y = 800, h = 800 },
+            })
+            local a = mock_window(1, "a", { x = 0, y = 0, w = 100, h = 100 }, { screen = "screen_a" })
+            local b = mock_window(2, "b", { x = 0, y = 0, w = 100, h = 100 }, { screen = "screen_b" })
+            Windows.addWindow(a, 1); Windows.addWindow(b, 1)
+            Mocks.focused_window = a
+
+            Tiling.tileWorkspace(1)
+
+            assert.are.equal(40, a:frame().y)  -- top display's canvas
+            assert.are.equal(840, b:frame().y) -- bottom display's canvas
         end)
 
         it("does nothing for a workspace that is not active", function()

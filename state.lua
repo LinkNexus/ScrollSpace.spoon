@@ -36,76 +36,85 @@ function State.clear()
     State.prev_focused_window = nil
 end
 
----walk through all tiled windows in a workspace (across every screen) and
+---walk through all tiled windows in a workspace (across every strip) and
 ---update the index table
 ---@param workspace number
 local function update_index(workspace)
-    for screen_uuid, columns in pairs(window_list[workspace] or {}) do
+    for strip, columns in pairs(window_list[workspace] or {}) do
         for col, rows in ipairs(columns) do
             for row, window in ipairs(rows) do
-                index_table[window:id()] = { workspace = workspace, screen = screen_uuid, col = col, row = row }
+                index_table[window:id()] = { workspace = workspace, strip = strip, col = col, row = row }
             end
         end
     end
 end
 
----get a proxy table for a workspace's screens, a screen's columns, a
+---get a proxy table for a workspace's strips, a strip's columns, a
 ---column's rows, or a specific window -- the proxy tables can be used to
 ---iterate over, insert, remove, and access windows while keeping track of
----internal state. Screens are a map keyed by hs.screen:getUUID() (not an
----ordered list -- there's no meaningful "position" for a screen), so the
----screen-level proxy only supports direct assignment/iteration, not
----table.insert/table.remove like the column/row levels do.
----@param workspace number get a workspace's screens
----@param screen string|nil hs.screen:getUUID() -- get a screen's columns
+---internal state.
+---
+---A *strip* is one continuous column sequence. Which displays back a
+---strip is screens.lua's business: displays arranged side by side share a
+---single strip so the column sequence flows across them, while displays
+---stacked vertically get one strip each. The strip key is the UUID of its
+---leftmost display, so a single-monitor setup's key is simply that
+---display's UUID.
+---
+---Strips are a map keyed by that UUID (not an ordered list -- there's no
+---meaningful "position" for a strip), so the strip-level proxy only
+---supports direct assignment/iteration, not table.insert/table.remove
+---like the column/row levels do.
+---@param workspace number get a workspace's strips
+---@param strip string|nil strip key -- get a strip's columns
 ---@param column number|nil get a list of windows for a column
 ---@param row number|nil get a window for a row in a column
 ---@return table|Window|nil
-function State.windowList(workspace, screen, column, row)
+function State.windowList(workspace, strip, column, row)
     if not workspace then return end
 
-    local screens = window_list[workspace]
+    local strips = window_list[workspace]
 
-    if not screen then
-        return setmetatable({}, screens and {
-            __index = function(_, screen_uuid) return screens[screen_uuid] end,
-            __newindex = function(_, screen_uuid, columns)
-                screens[screen_uuid] = columns
+    if not strip then
+        return setmetatable({}, strips and {
+            __index = function(_, key) return strips[key] end,
+            __newindex = function(_, key, columns)
+                strips[key] = columns
                 if not next(window_list[workspace]) then window_list[workspace] = nil end
                 update_index(workspace)
             end,
-            __pairs = function(_) return pairs(screens) end,
+            __pairs = function(_) return pairs(strips) end,
         } or { -- metatable for a nil workspace
-            __newindex = function(_, screen_uuid, columns)
+            __newindex = function(_, key, columns)
                 if not window_list[workspace] then window_list[workspace] = {} end
-                window_list[workspace][screen_uuid] = columns
+                window_list[workspace][key] = columns
                 update_index(workspace)
             end,
         })
     end
 
-    local columns = screens and screens[screen]
+    local columns = strips and strips[strip]
 
     if not column then
         return setmetatable({}, columns and {
             __index = function(_, column) return columns[column] end,
             __newindex = function(_, column, rows)
-                -- screen is guaranteed to exist here
+                -- strip is guaranteed to exist here
                 columns[column] = rows -- add a new column
-                -- handle case where all columns have been removed from a screen/workspace
-                if not next(screens[screen]) then screens[screen] = nil end
+                -- handle case where all columns have been removed from a strip/workspace
+                if not next(strips[strip]) then strips[strip] = nil end
                 if not next(window_list[workspace]) then window_list[workspace] = nil end
                 update_index(workspace)
             end,
             __len = function(_) return #columns end,
             __pairs = function(_) return pairs(columns) end,
             __ipairs = function(_) return ipairs(columns) end,
-        } or { -- metatable for a nil screen (and/or nil workspace)
+        } or { -- metatable for a nil strip (and/or nil workspace)
             __newindex = function(_, column, rows)
-                -- screen/workspace may not exist here so create them
+                -- strip/workspace may not exist here so create them
                 if not window_list[workspace] then window_list[workspace] = {} end
-                if not window_list[workspace][screen] then window_list[workspace][screen] = {} end
-                window_list[workspace][screen][column] = rows
+                if not window_list[workspace][strip] then window_list[workspace][strip] = {} end
+                window_list[workspace][strip][column] = rows
                 update_index(workspace)
             end,
         })
@@ -122,7 +131,7 @@ function State.windowList(workspace, screen, column, row)
         __newindex = function(_, row, window)
             rows[row] = window
             if not next(columns[column]) then table.remove(columns, column) end
-            if not next(screens[screen]) then screens[screen] = nil end
+            if not next(strips[strip]) then strips[strip] = nil end
             if not next(window_list[workspace]) then window_list[workspace] = nil end
             update_index(workspace)
         end,
@@ -180,27 +189,27 @@ function State.uiWatcherStopAll()
 end
 
 ---return a table that provides accessor methods to x_positions via a
----metatable. x positions are inherently per-screen (a horizontal scroll
----position only makes sense within one screen's own canvas)
+---metatable. x positions are inherently per-strip (a horizontal scroll
+---position only makes sense within one strip's own canvas)
 ---@param workspace number
----@param screen string hs.screen:getUUID()
-function State.xPositions(workspace, screen)
+---@param strip string strip key, see State.windowList
+function State.xPositions(workspace, strip)
     return setmetatable({}, {
         __index = function(_, id)
             local ws = x_positions[workspace]
-            local scr = ws and ws[screen]
-            return scr and scr[id]
+            local positions = ws and ws[strip]
+            return positions and positions[id]
         end,
         __newindex = function(_, id, x)
             if not x_positions[workspace] then x_positions[workspace] = {} end
-            if not x_positions[workspace][screen] then x_positions[workspace][screen] = {} end
-            x_positions[workspace][screen][id] = x
-            if not next(x_positions[workspace][screen]) then x_positions[workspace][screen] = nil end
+            if not x_positions[workspace][strip] then x_positions[workspace][strip] = {} end
+            x_positions[workspace][strip][id] = x
+            if not next(x_positions[workspace][strip]) then x_positions[workspace][strip] = nil end
             if not next(x_positions[workspace]) then x_positions[workspace] = nil end
         end,
         __pairs = function(_)
             local ws = x_positions[workspace]
-            return pairs((ws and ws[screen]) or {})
+            return pairs((ws and ws[strip]) or {})
         end,
     })
 end
@@ -249,19 +258,19 @@ function State.pruneDead()
         end
     end
 
-    -- remove highest row/col first within each workspace+screen so
+    -- remove highest row/col first within each workspace+strip so
     -- removing one entry doesn't shift the row/col index of another
-    -- pending removal in the same column. Screen order doesn't matter --
-    -- screens don't interact -- it's only here to keep the sort a total
+    -- pending removal in the same column. Strip order doesn't matter --
+    -- strips don't interact -- it's only here to keep the sort a total
     -- order across every dead index
     table.sort(dead_indices, function(a, b)
         if a.workspace ~= b.workspace then return a.workspace > b.workspace end
-        if a.screen ~= b.screen then return a.screen > b.screen end
+        if a.strip ~= b.strip then return a.strip > b.strip end
         if a.col ~= b.col then return a.col > b.col end
         return a.row > b.row
     end)
     for _, index in ipairs(dead_indices) do
-        table.remove(State.windowList(index.workspace, index.screen, index.col), index.row)
+        table.remove(State.windowList(index.workspace, index.strip, index.col), index.row)
     end
     for _, id in ipairs(dead_ids) do
         -- update_index() only rewrites entries for windows still in the
@@ -290,49 +299,80 @@ function State.pruneDead()
     end
 end
 
----resolve a persisted/tracked screen UUID to a currently-connected
----screen, falling back to the primary screen if that exact display isn't
----connected right now (e.g. an external monitor that's been unplugged).
+---resolve a persisted/tracked strip key against the *current* display
+---arrangement, returning the key of the strip that should own it now.
+---
+---Three cases fold into one rule -- "ask screens.lua which strip holds
+---this display, else fall back to the primary display's strip":
+---  - the display is still connected and still keys its own strip: the
+---    key is returned unchanged (the common case, and the only one on a
+---    single monitor).
+---  - the display is connected but no longer leftmost in its strip --
+---    e.g. a display was just plugged in to its left, so the two now
+---    form one side-by-side strip keyed by the newcomer. The bucket has
+---    to migrate to that new key or it would tile as a second,
+---    overlapping strip on the same displays.
+---  - the display isn't connected at all (unplugged monitor): its
+---    windows go to the primary display's strip rather than being
+---    stranded until that exact display comes back.
 ---Shared by State.load()'s startup reconciliation and the live
----disconnect handling in State.reconcileScreens().
----@param uuid string|nil
----@return userdata screen
-function State.resolveScreen(uuid)
-    local screen = uuid and hs.screen.find(uuid)
-    return screen or hs.screen.primaryScreen()
+---arrangement handling in State.reconcileStrips().
+---@param key string|nil strip key as persisted/tracked
+---@return string strip key to use now
+function State.resolveStrip(key)
+    local group = key and State.ScrollSpace.screens.groupFor(key)
+    if group then return group.key end
+
+    local primary = hs.screen.primaryScreen()
+    if not primary then return key end
+
+    local primary_group = State.ScrollSpace.screens.groupFor(primary:getUUID())
+    return primary_group and primary_group.key or primary:getUUID()
 end
 
----merge any workspace's screen bucket whose display is no longer
----connected onto the primary screen's bucket for that workspace, so
----disconnecting a monitor doesn't strand its windows until that exact
----display reconnects. Called from events.lua's screen_watcher.
+---re-key every workspace's strips against the current display
+---arrangement, merging any strip whose key has moved into the strip that
+---owns it now (see State.resolveStrip for the three cases). Called from
+---events.lua's screen_watcher, so unplugging a monitor or rearranging
+---displays takes effect immediately.
+---
+---Note this can only ever merge strips, never split one: columns don't
+---record which display they were physically on, so when a side-by-side
+---strip is broken up (unplugging the middle display of a three-display
+---chain, say) every column lands on one of the resulting strips rather
+---than being distributed between them. Every window stays tracked, tiled
+---and reachable, which is the same degrade as the unplug case.
 ---@return boolean true if anything moved (caller should retile)
-function State.reconcileScreens()
-    local primary = hs.screen.primaryScreen()
-    if not primary then return false end
-    local primary_uuid = primary:getUUID()
-
+function State.reconcileStrips()
     -- collect first, mutate after: adding a new key to window_list[workspace]
-    -- (creating the primary bucket via State.windowList below) while still
+    -- (creating the target bucket via State.windowList below) while still
     -- iterating pairs(window_list[workspace]) is undefined behavior in Lua
     local stale = {}
-    for workspace, screens in pairs(window_list) do
-        for screen_uuid, _ in pairs(screens) do
-            if screen_uuid ~= primary_uuid and not hs.screen.find(screen_uuid) then
-                table.insert(stale, { workspace = workspace, screen_uuid = screen_uuid })
+    for workspace, strips in pairs(window_list) do
+        for strip, _ in pairs(strips) do
+            local target = State.resolveStrip(strip)
+            if target and target ~= strip then
+                table.insert(stale, { workspace = workspace, strip = strip, target = target })
             end
         end
     end
 
+    -- deterministic merge order: when several strips collapse into one,
+    -- the column order of the result shouldn't depend on pairs() order
+    table.sort(stale, function(a, b)
+        if a.workspace ~= b.workspace then return tostring(a.workspace) < tostring(b.workspace) end
+        return a.strip < b.strip
+    end)
+
     local moved = false
     for _, entry in ipairs(stale) do
-        local columns = window_list[entry.workspace] and window_list[entry.workspace][entry.screen_uuid]
+        local columns = window_list[entry.workspace] and window_list[entry.workspace][entry.strip]
         if columns then
-            local target = State.windowList(entry.workspace, primary_uuid)
+            local target = State.windowList(entry.workspace, entry.target)
             for _, column in ipairs(columns) do
                 table.insert(target, column)
             end
-            window_list[entry.workspace][entry.screen_uuid] = nil
+            window_list[entry.workspace][entry.strip] = nil
             moved = true
         end
     end
@@ -366,10 +406,10 @@ function State.dump()
     table.insert(output, string.format("current_workspace: %s", tostring(State.current_workspace)))
 
     table.insert(output, "window_list:")
-    for workspace, screens in pairs(window_list) do
+    for workspace, strips in pairs(window_list) do
         table.insert(output, string.format("  Workspace %s:", tostring(workspace)))
-        for screen_uuid, columns in pairs(screens) do
-            table.insert(output, string.format("    Screen %s:", screen_uuid))
+        for strip, columns in pairs(strips) do
+            table.insert(output, string.format("    Strip %s:", strip))
             for col_idx, column in ipairs(columns) do
                 table.insert(output, string.format("      Column %d:", col_idx))
                 for row_idx, window in ipairs(column) do
@@ -381,8 +421,8 @@ function State.dump()
 
     table.insert(output, "\nindex_table:")
     for id, index in pairs(index_table) do
-        table.insert(output, string.format("  Window ID %d: workspace=%s, screen=%s, col=%d, row=%d",
-            id, tostring(index.workspace), tostring(index.screen), index.col, index.row))
+        table.insert(output, string.format("  Window ID %d: workspace=%s, strip=%s, col=%d, row=%d",
+            id, tostring(index.workspace), tostring(index.strip), index.col, index.row))
     end
 
     table.insert(output, "\nis_floating:")
@@ -415,9 +455,9 @@ local function serialize()
         last_focused = {},
     }
 
-    for workspace, screens in pairs(window_list) do
-        local screens_out = {}
-        for screen_uuid, columns in pairs(screens) do
+    for workspace, strips in pairs(window_list) do
+        local strips_out = {}
+        for strip, columns in pairs(strips) do
             local cols = {}
             for _, rows in ipairs(columns) do
                 local ids = {}
@@ -426,9 +466,9 @@ local function serialize()
                 end
                 table.insert(cols, ids)
             end
-            screens_out[screen_uuid] = cols -- already a string (hs.screen:getUUID()), no tostring() needed
+            strips_out[strip] = cols -- already a string (a display UUID), no tostring() needed
         end
-        snapshot.window_list[tostring(workspace)] = screens_out
+        snapshot.window_list[tostring(workspace)] = strips_out
     end
 
     for id, workspace in pairs(State.is_floating) do
@@ -508,31 +548,32 @@ function State.load()
     -- design). hs.window.get(id) finds a window regardless of minimized
     -- state, same as pruneDead() already relies on.
     window_list = {}
-    for workspace_str, screens in pairs(snapshot.window_list or {}) do
+    for workspace_str, strips in pairs(snapshot.window_list or {}) do
         local workspace = tonumber(workspace_str)
 
-        -- format migration: a pre-screen-field snapshot has
+        -- format migration: a pre-strip-field snapshot has
         -- window_list[workspace] as a plain array of column-id-arrays
-        -- (integer keys 1,2,3...), not a map of screen-uuid -> columns
+        -- (integer keys 1,2,3...), not a map of strip-key -> columns
         -- (string keys). Skip this workspace's window_list entirely
         -- rather than misinterpreting the shape -- refreshWindows()
         -- rediscovers every live window from scratch regardless, so an
         -- empty start here is a safe degrade, same as corrupt JSON below.
-        local is_screen_map = workspace and type(screens) == "table"
-        if is_screen_map then
-            for screen_uuid, _ in pairs(screens) do
-                if type(screen_uuid) ~= "string" then
-                    is_screen_map = false
+        local is_strip_map = workspace and type(strips) == "table"
+        if is_strip_map then
+            for strip, _ in pairs(strips) do
+                if type(strip) ~= "string" then
+                    is_strip_map = false
                     break
                 end
             end
         end
 
-        if is_screen_map then
-            for screen_uuid, columns in pairs(screens) do
-                -- a monitor that isn't connected right now merges onto
-                -- the primary screen instead of silently vanishing
-                local target_uuid = State.resolveScreen(screen_uuid):getUUID()
+        if is_strip_map then
+            for strip, columns in pairs(strips) do
+                -- a strip whose display isn't connected right now merges
+                -- onto the primary display's strip instead of silently
+                -- vanishing
+                local target_strip = State.resolveStrip(strip)
                 for _, ids in ipairs(columns) do
                     local rows = {}
                     for _, id in ipairs(ids) do
@@ -544,8 +585,8 @@ function State.load()
                     end
                     if #rows > 0 then
                         if not window_list[workspace] then window_list[workspace] = {} end
-                        if not window_list[workspace][target_uuid] then window_list[workspace][target_uuid] = {} end
-                        table.insert(window_list[workspace][target_uuid], rows)
+                        if not window_list[workspace][target_strip] then window_list[workspace][target_strip] = {} end
+                        table.insert(window_list[workspace][target_strip], rows)
                     end
                 end
             end

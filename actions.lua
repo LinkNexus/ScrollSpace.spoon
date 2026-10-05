@@ -32,7 +32,11 @@ function Actions.actions()
         barf_out = Actions.ScrollSpace.windows.barfWindow,
         toggle_floating = Actions.ScrollSpace.floating.toggleFloating,
         focus_floating = Actions.ScrollSpace.floating.focusFloating,
-        move_window_to_next_screen = Actions.ScrollSpace.workspace.moveWindowToNextScreen,
+        move_window_to_next_strip = Actions.ScrollSpace.workspace.moveWindowToNextStrip,
+        -- kept resolvable so an explicit binding written against the old
+        -- name still works; only the new name is in default_hotkeys, so
+        -- copying that table can't double-bind the chord
+        move_window_to_next_screen = Actions.ScrollSpace.workspace.moveWindowToNextStrip,
         toggle_scratchpad = Actions.ScrollSpace.scratchpad.toggleScratchpad,
         set_scratchpad = Actions.ScrollSpace.scratchpad.setScratchpad,
     }

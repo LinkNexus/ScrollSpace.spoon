@@ -56,9 +56,10 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
   vertically; column widths vary; layout scrolls horizontally past screen
   edges. Port PaperWM's `tileColumn`/`tileSpace` algorithm directly, just
   re-keyed by workspace id instead of Space id.
-- **Data model:** `window_list[workspace][col][row] = hs.window`, plus
-  `index_table[window_id] = {workspace, col, row}` for O(1) lookup — same
-  shape as PaperWM, `space` replaced with our own `workspace` integer.
+- **Data model:** `window_list[workspace][strip][col][row] = hs.window`,
+  plus `index_table[window_id] = {workspace, strip, col, row}` for O(1)
+  lookup — same shape as PaperWM, `space` replaced with our own
+  `workspace` integer, and a `strip` level added (see Multi-monitor).
 - **State is persisted externally, not just held in memory.** On every
   change to `window_list`/`index_table`/floating set/scratchpad/
   `current_workspace` (debounced, not synchronous per-event), write a
@@ -90,7 +91,7 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
   explicitly moved to another workspace, or made floating.
 
   Tiling skips them: `tiling.lua`'s `visible_columns()` projects a
-  screen's strip down to just the windows that are on screen right now,
+  strip's columns down to just the windows that are on screen right now,
   preserving column indices so an anchor's `col` stays meaningful. A
   minimized window left in the layout math would claim a share of its
   column's height, and a fully hidden column would leave a gap that
@@ -153,39 +154,91 @@ Reference source: https://github.com/Hammerspoon/Spoons/blob/master/Source/Paper
   (PaperWM already excludes non-standard windows via
   `allowRoles = "AXStandardWindow"`; add a defensive `subrole()` check too
   since native PiP windows report a distinct subrole).
-- **Multi-monitor: implemented.** A workspace spans every connected
-  screen at once — each screen tiles its own independent column strip
-  (`window_list[workspace][screen_uuid][col][row]`, keyed by
-  `hs.screen:getUUID()`), all showing/hiding together when the workspace
-  switches, but scrolling/navigation (focus/swap/slurp/barf) stays within
-  one screen at a time. `move_window_to_next_screen` cycles the focused
-  window to the next connected screen, keeping its workspace.
+- **Multi-monitor: implemented, as strips rather than per-display.** The
+  unit of tiling is a **strip**: one continuous column sequence.
+  `screens.lua` decides which displays back a strip, and the rule is the
+  physical arrangement:
+  - displays arranged **side by side** form a *single* strip that flows
+    across them. Scrolling carries columns from one display onto the next;
+    focus/swap/slurp/barf just walk the one column array, so they cross
+    displays for free.
+  - displays stacked **vertically** get *one strip each*. A strip has no
+    business flowing through the bezel between a display and the one
+    above it.
 
-  Off-viewport columns (ones scrolled past a screen's own edge) are
-  positioned off-canvas via coordinates (clamped to `right_margin`/
-  `left_margin`), same as before multi-monitor support — **not**
-  minimized. An earlier revision of this Spoon minimized off-viewport
-  columns instead, reasoning that macOS clamps a window's frame back onto
-  the nearest connected screen so coordinate placement leaves a visible
-  sliver at the edge. That's true, but it made ordinary horizontal
-  scrolling within a workspace visibly minimize/unminimize windows
-  (Dock genie animation, Dock icon churn) on every scroll step, including
-  on a single monitor where there's no adjacent screen for a sliver to
-  bleed onto — a worse trade than the sliver itself. Reverted deliberately
-  (user call, 2026-08-17): off-canvas coordinate clamping is back for
-  overflow columns on **every** screen count, accepting the known
-  limitation that on genuinely adjacent multi-monitor setups a column
-  clamped to one screen's edge can show a visible sliver on the
-  neighboring screen — that's considered preferable to minimize-based
-  scrolling. Full-workspace hide/show (`switchWorkspace`) and the
-  scratchpad still use `minimize()`/`unminimize()` — that part is
-  unaffected and not in question.
+  Data model: `window_list[workspace][strip][col][row]`, where the strip
+  key is the UUID of its **leftmost** display. A single-monitor setup's
+  key is therefore just that display's UUID, so no state migration was
+  needed for it. `index_table[window_id] = {workspace, strip, col, row}`.
 
-  A monitor disconnecting merges its windows onto the primary screen
-  (`State.reconcileScreens()`, called from `events.lua`'s screen_watcher)
-  rather than stranding them until that exact display reconnects; a
-  monitor not connected at load time gets the same treatment in
-  `State.load()` via `State.resolveScreen()`.
+  Adjacency (`screens.lua`) is judged on `fullFrame()`, not `frame()`:
+  `frame()` is the usable area, so a Dock pinned to a left or right edge
+  insets it and two physically flush displays would stop looking
+  adjacent. Two displays join a strip when their edges touch within 2pt
+  *and* they overlap vertically for at least 50% of the **shorter** one's
+  height — the share is of the shorter display so a built-in beside an
+  ultrawide still counts, while a display merely clipping a neighbour's
+  corner does not. A strip is one-dimensional, so each display gets at
+  most one left and one right neighbour; where two stacked displays both
+  abut a third, the better-overlapping one continues the strip and the
+  other becomes its own strip rather than making column order ambiguous.
+
+  **Columns never straddle a display boundary.** A column that won't fit
+  in the rest of the current display starts at the next display's left
+  edge instead, leaving the slack as dead space at the previous display's
+  right edge. Straddling would put one window across a physical bezel at
+  two different scale factors. Absorbing the slack by widening the
+  preceding column is deliberately *not* done: column widths are read
+  back out of window frames on the next pass (`tileColumn`'s
+  `w or frame.w`), so stretching would permanently overwrite the width
+  the user picked with `cycleWindowSize`. Each column takes its vertical
+  bounds from the display it lands on, so a short display beside a tall
+  one tiles to its own height.
+
+  Off-viewport columns (scrolled past the **strip's** own end) are still
+  positioned off-canvas via coordinates clamped to `left_margin`/
+  `right_margin` — **not** minimized. What changed is that those margins
+  are now the strip's *outer* edges rather than each display's: an
+  interior display edge is no longer somewhere to park. That was the bug
+  — with per-display strips, a column scrolled off the ultrawide was
+  parked 1pt inside the ultrawide's right edge, which left ~1pt on the
+  ultrawide and the entire rest of the window visible on the built-in
+  beside it. The CLAUDE.md note of 2026-08-17 described this as "a
+  visible sliver on the neighboring screen", which understated it badly.
+
+  An earlier revision minimized off-viewport columns instead, reasoning
+  that macOS clamps a window's frame back onto the nearest connected
+  screen. That's true, but it made ordinary horizontal scrolling visibly
+  minimize/unminimize windows (Dock genie animation, Dock icon churn) on
+  every scroll step, including on a single monitor. Reverted deliberately
+  (user call, 2026-08-17) and still reverted: with strip-wide margins the
+  interior-edge case that motivated it no longer exists. Full-workspace
+  hide/show (`switchWorkspace`) and the scratchpad still use
+  `minimize()`/`unminimize()` — unaffected and not in question.
+
+  `State.reconcileStrips()` (called from `events.lua`'s screen_watcher,
+  and mirrored in `State.load()` via `State.resolveStrip()`) re-keys
+  buckets against the current arrangement, covering three cases with one
+  rule — "ask screens.lua which strip holds this display, else fall back
+  to the primary display's strip":
+  - the display is gone (unplugged monitor): its windows merge onto the
+    primary display's strip rather than being stranded.
+  - the display is connected but no longer leftmost in its strip, because
+    something was plugged in to its left: the bucket migrates to the new
+    key, or it would tile as a second overlapping strip.
+  - two strips have become one side-by-side run: they merge.
+
+  It can only ever *merge* strips, never split one — columns don't record
+  which display they were physically on, so breaking up a side-by-side
+  strip lands every column on one of the results. Every window stays
+  tracked, tiled and reachable, the same degrade as the unplug case.
+
+  `move_window_to_next_strip` (was `move_window_to_next_screen`; the old
+  action name stays resolvable in `actions.lua` for explicit bindings)
+  cycles the focused window to the next strip, keeping its workspace. It
+  no-ops when every display forms one strip, since there is nothing to
+  move the window *to* — scrolling the strip is what puts a window on the
+  next display over.
 
 ## Module layout
 
@@ -197,11 +250,12 @@ Same split as PaperWM.spoon, so the two stay diffable:
 | `config.lua` | `config.lua` | defaults applied onto the Spoon table |
 | `state.lua` | `state.lua` | `window_list`/`index_table`/watchers/`x_positions` behind proxy tables, plus JSON persistence |
 | `windows.lua` | `windows.lua` | window-list surgery (`addWindow`/`removeWindow`/`refreshWindows`) and per-window commands (focus/swap/center/cycle/slurp/barf/`moveWindow`) |
-| `workspace.lua` | `space.lua` | switching (`switchWorkspace`), moving windows between workspaces and screens |
-| `tiling.lua` | `tiling.lua` | `tileColumn` / `tileWorkspace` |
+| `workspace.lua` | `space.lua` | switching (`switchWorkspace`), moving windows between workspaces and strips |
+| `tiling.lua` | `tiling.lua` | `tileColumn` / `tileGroup` / `tileWorkspace` |
 | `events.lua` | `events.lua` | window filter subscriptions, screen and app watchers |
 | `actions.lua` | `actions.lua` | hotkey-bindable action spec |
 | `floating.lua` | `floating.lua` | the floating layer |
+| `screens.lua` | — | display topology: which displays form one strip |
 | `rules.lua` | — | per-window workspace assignment rules |
 | `scratchpad.lua` | — | the single global scratchpad window |
 | `spec/` | `spec/` | busted specs against a mocked `hs` namespace |

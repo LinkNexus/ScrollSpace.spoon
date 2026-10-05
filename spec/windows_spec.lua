@@ -157,9 +157,24 @@ describe("ScrollSpace.windows", function()
             assert.is_nil(Windows.focusWindow(Direction.LEFT))
         end)
 
-        it("does not cross screens", function()
-            -- navigation is per-screen: a workspace spans every connected
-            -- screen but each tiles its own independent strip
+        it("crosses between side-by-side displays within one strip", function()
+            -- the default arrangement is two flush displays, so they are a
+            -- single strip and focus just walks to the next column --
+            -- whichever display that column happens to be sitting on
+            local a = mock_window(1, "a", nil, { screen = "screen_a" })
+            local b = mock_window(2, "b", nil, { screen = "screen_b" })
+            Windows.addWindow(a, 1); Windows.addWindow(b, 1)
+            Mocks.focused_window = a
+            assert.are.equal(b, Windows.focusWindow(Direction.RIGHT))
+        end)
+
+        it("does not cross between separate strips", function()
+            -- stacked displays are separate strips, and navigation stays
+            -- within one strip
+            Mocks.set_screens({
+                { uuid = "screen_a", x = 0, y = 0, h = 800 },
+                { uuid = "screen_b", x = 0, y = 800, h = 800 },
+            })
             local a = mock_window(1, "a", nil, { screen = "screen_a" })
             local b = mock_window(2, "b", nil, { screen = "screen_b" })
             Windows.addWindow(a, 1); Windows.addWindow(b, 1)

@@ -78,16 +78,16 @@ function Workspace.switchWorkspace(n)
         last_window:focus()
     else
         -- no remembered window: fall back to the leftmost column of the
-        -- main screen's strip, then any other screen. pairs() order over
-        -- the screen buckets is arbitrary, so pick the main screen
+        -- main display's strip, then any other strip. pairs() order over
+        -- the strip buckets is arbitrary, so pick the main display's strip
         -- explicitly rather than landing on a random monitor
         local main_screen = hs.screen.mainScreen()
-        local preferred = main_screen and main_screen:getUUID()
+        local preferred = main_screen and state.resolveStrip(main_screen:getUUID())
         local fallback = nil
-        for screen_uuid, columns in pairs(state.windowList(n)) do
+        for strip, columns in pairs(state.windowList(n)) do
             local window = columns[1] and columns[1][1]
             if window and not window:isMinimized() then
-                if screen_uuid == preferred then
+                if strip == preferred then
                     fallback = window
                     break
                 end
@@ -127,8 +127,8 @@ function Workspace.moveWindowToWorkspace(window, n)
             return
         end
         if index.workspace == n then return end
-        table.remove(state.windowList(index.workspace, index.screen, index.col), index.row)
-        table.insert(state.windowList(n, index.screen), { window })
+        table.remove(state.windowList(index.workspace, index.strip, index.col), index.row)
+        table.insert(state.windowList(n, index.strip), { window })
     end
 
     if n == current then
@@ -144,16 +144,24 @@ function Workspace.moveWindowToWorkspace(window, n)
     state.save()
 end
 
----move a window to the next connected screen (cycling, wraps around),
----keeping it on the same workspace: list surgery only (remove from its
----current screen's column, insert as a new column at the end of the
----target screen's list), same shape as moveWindowToWorkspace above but
----keyed by screen instead of workspace. Floating/scratchpad windows have
----no screen concept in this data model (they're just minimized/
----unminimized wherever the OS already put them), so this is a no-op for
----them.
+---move a window to the next strip (cycling, wraps around), keeping it on
+---the same workspace: list surgery only (remove from its current strip's
+---column, insert as a new column at the end of the target strip's list),
+---same shape as moveWindowToWorkspace above but keyed by strip instead of
+---workspace.
+---
+---Strips, not displays: within a side-by-side run of displays the column
+---sequence already flows across them, so there is nothing to move the
+---window *to* -- scrolling the strip is what puts a window on the next
+---display over. This action is for the case displays genuinely are
+---separate strips, i.e. stacked vertically, so it no-ops on a setup whose
+---displays all form a single strip.
+---
+---Floating/scratchpad windows have no strip in this data model (they're
+---just minimized/unminimized wherever the OS already put them), so this
+---is a no-op for them.
 ---@param window Window|nil defaults to the focused window
-function Workspace.moveWindowToNextScreen(window)
+function Workspace.moveWindowToNextStrip(window)
     window = window or Window.focusedWindow()
     if not window then
         Workspace.ScrollSpace.logger.d("focused window not found")
@@ -164,31 +172,29 @@ function Workspace.moveWindowToNextScreen(window)
     local index = state.windowIndex(window)
     if not index then
         Workspace.ScrollSpace.logger.d(
-            "window is not tiled (floating/scratchpad windows don't have a screen to move between)")
+            "window is not tiled (floating/scratchpad windows don't have a strip to move between)")
         return
     end
 
-    local screens = hs.screen.allScreens()
-    if #screens < 2 then return end
-    table.sort(screens, function(a, b) return a:frame().x < b:frame().x end)
+    local groups = Workspace.ScrollSpace.screens.groups()
+    if #groups < 2 then return end
 
     local current_pos = nil
-    for i, screen in ipairs(screens) do
-        if screen:getUUID() == index.screen then
+    for i, group in ipairs(groups) do
+        if group.key == index.strip then
             current_pos = i
             break
         end
     end
     if not current_pos then
-        Workspace.ScrollSpace.logger.e("window's screen not found among connected screens")
+        Workspace.ScrollSpace.logger.e("window's strip not found among the connected displays")
         return
     end
 
-    local target_screen = screens[(current_pos % #screens) + 1]
-    local target_uuid = target_screen:getUUID()
+    local target = groups[(current_pos % #groups) + 1]
 
-    table.remove(state.windowList(index.workspace, index.screen, index.col), index.row)
-    table.insert(state.windowList(index.workspace, target_uuid), { window })
+    table.remove(state.windowList(index.workspace, index.strip, index.col), index.row)
+    table.insert(state.windowList(index.workspace, target.key), { window })
 
     Workspace.ScrollSpace:tileWorkspace(index.workspace)
     state.save()

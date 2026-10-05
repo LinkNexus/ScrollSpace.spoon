@@ -22,23 +22,30 @@ function Windows.init(scrollspace)
     Windows.ScrollSpace = scrollspace
 end
 
----return the first window that's completely on the screen, for use as a
----tiling anchor when no focused window is available for the workspace's
----bucket on this screen. Minimized windows are skipped -- they stay in
----window_list by design but have no meaningful on-screen position.
+---return the first window that's completely within the strip's visible
+---span, for use as a tiling anchor when no focused window is available
+---for the workspace's bucket on this strip. Minimized windows are skipped
+----- they stay in window_list by design but have no meaningful on-screen
+---position.
+---
+---The span is measured across the strip's whole run of displays (its
+---leftmost display's left edge to its rightmost display's right edge),
+---not one display, so a window sitting on the second display of a
+---side-by-side pair still counts as on-screen.
 ---@param workspace number
----@param screen userdata hs.screen
+---@param group table strip group from screens.lua: { key, screens }
 ---@param direction Direction|nil either LEFT or RIGHT, defaults to LEFT
 ---@return Window|nil
-function Windows.getFirstVisibleWindow(workspace, screen, direction)
+function Windows.getFirstVisibleWindow(workspace, group, direction)
     direction = direction or Direction.LEFT
-    local screen_frame = screen:frame()
+    local span_x = group.screens[1]:frame().x
+    local span_x2 = group.screens[#group.screens]:frame().x2
     local on_screen_distance = math.huge
     local on_screen_closest = nil
     local off_screen_distance = -math.huge
     local off_screen_closest = nil
 
-    for _, windows in ipairs(Windows.ScrollSpace.state.windowList(workspace, screen:getUUID())) do
+    for _, windows in ipairs(Windows.ScrollSpace.state.windowList(workspace, group.key)) do
         local window = (function() -- take first non-minimized window in column
             for _, candidate in ipairs(windows) do
                 if not candidate:isMinimized() then return candidate end
@@ -47,9 +54,9 @@ function Windows.getFirstVisibleWindow(workspace, screen, direction)
         if window then
             local d = (function()
                 if direction == Direction.LEFT then
-                    return window:frame().x - screen_frame.x
+                    return window:frame().x - span_x
                 elseif direction == Direction.RIGHT then
-                    return screen_frame.x2 - window:frame().x2
+                    return span_x2 - window:frame().x2
                 end
             end)() or math.huge
             if d >= 0 and d < on_screen_distance then
@@ -188,16 +195,16 @@ end
 ---workspace via the rule engine unless `workspace` is given explicitly
 ---(used when re-inserting a window that already had a known workspace,
 ---e.g. un-floating -- re-running rules there could send it somewhere
----other than where it was floating). Screen defaults to wherever the
----window actually is (add_window:screen()) unless given explicitly -- a
----workspace spans every connected screen, each with its own independent
----column strip. The window's minimized state is then set to match
----whether its workspace is the active one.
+---other than where it was floating). The strip defaults to the one that
+---owns wherever the window actually is (add_window:screen()) unless given
+---explicitly -- a workspace spans every connected display, as one strip
+---per side-by-side run of them. The window's minimized state is then set
+---to match whether its workspace is the active one.
 ---@param add_window Window new window to be added
 ---@param workspace number|nil explicit target workspace, skips the rule engine
----@param screen string|nil explicit target screen (hs.screen:getUUID()), skips add_window:screen()
+---@param strip string|nil explicit target strip key, skips add_window:screen()
 ---@return number|nil workspace that contains the new window
-function Windows.addWindow(add_window, workspace, screen)
+function Windows.addWindow(add_window, workspace, strip)
     local state = Windows.ScrollSpace.state
 
     -- A window with no tabs will have a tabCount of 0 or 1. Built-in Apple
@@ -240,23 +247,25 @@ function Windows.addWindow(add_window, workspace, screen)
     -- active right now
     workspace = workspace or Windows.ScrollSpace.rule_engine.assign(add_window) or state.current_workspace
 
-    if not screen then
+    if not strip then
         -- a minimized window can report no screen at all, so fall back to
-        -- the primary one rather than indexing nil
-        local window_screen = add_window:screen()
-        screen = (window_screen or hs.screen.primaryScreen()):getUUID()
+        -- the primary one rather than indexing nil. resolveStrip then maps
+        -- that display to whichever strip owns it: its own key on a single
+        -- monitor or a vertically stacked pair, or the shared key of a
+        -- side-by-side run of displays.
+        local window_screen = add_window:screen() or hs.screen.primaryScreen()
+        strip = state.resolveStrip(window_screen and window_screen:getUUID())
     end
 
-    -- find where to insert window (within this screen's own column list --
-    -- a workspace spans every connected screen, each tiling independently)
+    -- find where to insert window, within this strip's own column list
     local add_column = 1
     local prev_focused_index = state.prev_focused_window and state.windowIndex(state.prev_focused_window)
-    if prev_focused_index and prev_focused_index.workspace == workspace and prev_focused_index.screen == screen and
+    if prev_focused_index and prev_focused_index.workspace == workspace and prev_focused_index.strip == strip and
         (state.prev_focused_window:id() ~= add_window:id()) then
         add_column = prev_focused_index.col + 1
     else
         local x = add_window:frame().center.x
-        for col, windows in ipairs(state.windowList(workspace, screen)) do
+        for col, windows in ipairs(state.windowList(workspace, strip)) do
             if x < windows[1]:frame().center.x then
                 add_column = col     -- insert left of window
                 break                -- add_window will take this window's column
@@ -266,11 +275,11 @@ function Windows.addWindow(add_window, workspace, screen)
         end
     end
 
-    table.insert(state.windowList(workspace, screen), add_column, { add_window })
+    table.insert(state.windowList(workspace, strip), add_column, { add_window })
     state.uiWatcherCreate(add_window)
 
-    Windows.ScrollSpace.logger.df("adding window: %s (%d) to workspace %d, screen %s", add_window:title(),
-        add_window:id(), workspace, screen)
+    Windows.ScrollSpace.logger.df("adding window: %s (%d) to workspace %d, strip %s", add_window:title(),
+        add_window:id(), workspace, strip)
 
     -- match the window's visibility to its workspace. Both directions
     -- matter: a window joining an inactive workspace must be hidden, and
@@ -309,13 +318,13 @@ function Windows.removeWindow(remove_window, skip_new_window_focus)
     end
 
     if remove_window ~=
-        table.remove(state.windowList(remove_index.workspace, remove_index.screen, remove_index.col), remove_index.row) then
+        table.remove(state.windowList(remove_index.workspace, remove_index.strip, remove_index.col), remove_index.row) then
         Windows.ScrollSpace.logger.ef("removed window %s (%d) doesn't match", remove_window:title(),
             remove_window:id())
     end
 
     state.uiWatcherDelete(remove_window:id())
-    state.xPositions(remove_index.workspace, remove_index.screen)[remove_window:id()] = nil
+    state.xPositions(remove_index.workspace, remove_index.strip)[remove_window:id()] = nil
 
     if state.prev_focused_window == remove_window then
         state.prev_focused_window = nil
@@ -349,13 +358,13 @@ function Windows.focusWindow(direction, focused_index)
     if direction == Direction.LEFT or direction == Direction.RIGHT then
         -- walk down column, looking for match in neighbor column
         for row = focused_index.row, 1, -1 do
-            new_focused_window = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen,
+            new_focused_window = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip,
                 focused_index.col + direction, row)
             if new_focused_window then break end
         end
         -- wrap around: if no window found, go to the opposite end
         if not new_focused_window and Windows.ScrollSpace.infinite_loop_window then
-            local columns = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen)
+            local columns = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip)
             local num_cols = columns and #columns or 0
             if num_cols > 1 then
                 local wrap_col = direction == Direction.LEFT and num_cols or 1
@@ -374,10 +383,10 @@ function Windows.focusWindow(direction, focused_index)
         end
     elseif direction == Direction.UP or direction == Direction.DOWN then
         local target_row = focused_index.row + (direction // 2)
-        new_focused_window = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen,
+        new_focused_window = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip,
             focused_index.col, target_row)
         if not new_focused_window and Windows.ScrollSpace.infinite_loop_window then
-            local column = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen,
+            local column = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip,
                 focused_index.col)
             local num_rows = column and #column or 0
             if num_rows > 1 then
@@ -421,7 +430,7 @@ function Windows.swapWindows(direction)
     end
 
     if direction == Direction.LEFT or direction == Direction.RIGHT then
-        local columns = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen)
+        local columns = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip)
         if not columns then return end
 
         local current_column = focused_index.col
@@ -438,7 +447,7 @@ function Windows.swapWindows(direction)
         local windows = table.remove(columns, current_column)
         table.insert(columns, target_column, windows)
     elseif direction == Direction.UP or direction == Direction.DOWN then
-        local windows = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen,
+        local windows = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip,
             focused_index.col)
         if not windows then return end
 
@@ -585,12 +594,12 @@ function Windows.slurpWindow()
         return
     end
 
-    local current_column = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen,
+    local current_column = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip,
         focused_index.col)
     if not current_column then return end
 
     local target_col = focused_index.col - 1
-    local target_column = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen, target_col)
+    local target_column = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip, target_col)
     if not target_column then
         Windows.ScrollSpace.logger.d("no column to the left to slurp into")
         return
@@ -599,7 +608,7 @@ function Windows.slurpWindow()
     assert(focused_window == table.remove(current_column, focused_index.row))
     table.insert(target_column, focused_window)
 
-    tile_column_equally(Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen, target_col))
+    tile_column_equally(Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip, target_col))
     Windows.ScrollSpace:tileWorkspace(focused_index.workspace)
     Windows.ScrollSpace.state.save()
 end
@@ -619,7 +628,7 @@ function Windows.barfWindow()
         return
     end
 
-    local current_column = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen,
+    local current_column = Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip,
         focused_index.col)
     if not current_column then return end
     if #current_column == 1 then
@@ -629,14 +638,14 @@ function Windows.barfWindow()
 
     local target_col = focused_index.col + 1
     assert(focused_window == table.remove(current_column, focused_index.row))
-    table.insert(Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen), target_col,
+    table.insert(Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip), target_col,
         { focused_window })
 
     local focused_frame = focused_window:frame()
     focused_frame.x = focused_frame.x2 + Windows.getGap("right")
     Windows.moveWindow(focused_window, focused_frame)
 
-    tile_column_equally(Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.screen,
+    tile_column_equally(Windows.ScrollSpace.state.windowList(focused_index.workspace, focused_index.strip,
         focused_index.col))
     Windows.ScrollSpace:tileWorkspace(focused_index.workspace)
     Windows.ScrollSpace.state.save()

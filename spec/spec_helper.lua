@@ -8,6 +8,7 @@ Mocks.init_mocks()
 
 local H = { Mocks = Mocks }
 
+H.Screens = dofile("screens.lua")
 H.State = dofile("state.lua")
 H.Windows = dofile("windows.lua")
 H.Workspace = dofile("workspace.lua")
@@ -22,6 +23,7 @@ H.scrollspace = Mocks.get_mock_scrollspace(H)
 ---reset the mock hs namespace and every module's state between tests
 function H.reset()
     Mocks.init_mocks()
+    H.Screens.init(H.scrollspace)
     H.State.init(H.scrollspace)
     H.Windows.init(H.scrollspace)
     H.Workspace.init(H.scrollspace)

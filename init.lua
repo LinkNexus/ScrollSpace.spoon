@@ -47,6 +47,10 @@ ScrollSpace.logger = hs.logger.new(ScrollSpace.name)
 -- workspaces/screens). rules.lua and scratchpad.lua have no PaperWM
 -- counterpart.
 ScrollSpace.config = dofile(hs.spoons.resourcePath("config.lua"))
+-- screens.lua has no PaperWM counterpart either: it answers which
+-- connected displays form one continuous horizontal strip, which
+-- PaperWM never needed since it tiles per real macOS Space.
+ScrollSpace.screens = dofile(hs.spoons.resourcePath("screens.lua"))
 ScrollSpace.state = dofile(hs.spoons.resourcePath("state.lua"))
 ScrollSpace.windows = dofile(hs.spoons.resourcePath("windows.lua"))
 ScrollSpace.workspace = dofile(hs.spoons.resourcePath("workspace.lua"))
@@ -75,6 +79,7 @@ ScrollSpace.windows.init(ScrollSpace)
 ScrollSpace.workspace.init(ScrollSpace)
 ScrollSpace.events.init(ScrollSpace)
 ScrollSpace.actions.init(ScrollSpace)
+ScrollSpace.screens.init(ScrollSpace)
 ScrollSpace.state.init(ScrollSpace)
 ScrollSpace.floating.init(ScrollSpace)
 ScrollSpace.tiling.init(ScrollSpace)

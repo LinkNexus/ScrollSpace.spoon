@@ -30,13 +30,56 @@ function M.rect(x, y, w, h)
     })
 end
 
-function M.mock_screen(uuid, x)
+---@param uuid string
+---@param x number|nil left edge of the display's physical frame
+---@param opts table|nil { y, w, h, menu_bar, dock } -- physical geometry
+---plus the insets that make fullFrame() differ from frame(). Defaults
+---reproduce the original fixed 1000x800 display with a 32pt menu bar and
+---a 100pt bottom Dock, so existing two-argument callers are unaffected.
+---
+---`dock_left`/`dock_right` inset frame() horizontally without touching
+---fullFrame(), which is how a side-pinned Dock behaves -- screens.lua
+---judges adjacency on fullFrame() precisely so that case still reads as
+---two flush displays.
+function M.mock_screen(uuid, x, opts)
+    opts = opts or {}
     x = x or 0
+    local y = opts.y or 0
+    local w = opts.w or 1000
+    local h = opts.h or 800
+    local menu_bar = opts.menu_bar or 32
+    local dock = opts.dock or 100
+    local dock_left = opts.dock_left or 0
+    local dock_right = opts.dock_right or 0
+
     return {
-        frame = function() return M.rect(x, 32, 1000, 668) end,
-        fullFrame = function() return M.rect(x, 0, 1000, 800) end,
+        frame = function()
+            return M.rect(x + dock_left, y + menu_bar,
+                w - dock_left - dock_right, h - menu_bar - dock)
+        end,
+        fullFrame = function() return M.rect(x, y, w, h) end,
         getUUID = function() return uuid end,
     }
+end
+
+---replace the connected-display arrangement wholesale. Each entry is
+---{ uuid, x, ... } with the remaining keys passed through to
+---mock_screen's opts, so a spec can describe a real arrangement
+---(stacked, mismatched heights, gaps) rather than the default pair.
+---Order given is the order hs.screen.allScreens() reports, which is
+---deliberately NOT sorted -- screens.lua must do its own ordering.
+---@param arrangement table[]
+function M.set_screens(arrangement)
+    M.screens = {}
+    M.connected = {}
+    for _, entry in ipairs(arrangement) do
+        local opts = {}
+        for k, v in pairs(entry) do
+            if k ~= "uuid" and k ~= "x" and type(k) == "string" then opts[k] = v end
+        end
+        M.screens[entry.uuid] = M.mock_screen(entry.uuid, entry.x, opts)
+        table.insert(M.connected, entry.uuid)
+    end
 end
 
 ---@param id number
@@ -102,6 +145,7 @@ end
 function M.get_mock_scrollspace(modules)
     local scrollspace = {
         state = modules.State,
+        screens = modules.Screens,
         windows = modules.Windows,
         tiling = modules.Tiling,
         rule_engine = modules.Rules,

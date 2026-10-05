@@ -10,19 +10,19 @@ describe("ScrollSpace.state", function()
     before_each(function() H.reset() end)
 
     describe("windowList", function()
-        it("tracks a window's workspace, screen, column and row", function()
+        it("tracks a window's workspace, strip, column and row", function()
             local win = mock_window(1, "shell")
             State.windowList(2, "screen_b")[1] = { win }
 
             local index = State.windowIndex(win)
             assert.are.equal(2, index.workspace)
-            assert.are.equal("screen_b", index.screen)
+            assert.are.equal("screen_b", index.strip)
             assert.are.equal(1, index.col)
             assert.are.equal(1, index.row)
             assert.is_true(State.isTiled(1))
         end)
 
-        it("keeps each screen's columns independent within a workspace", function()
+        it("keeps each strip's columns independent within a workspace", function()
             local a = mock_window(1, "a")
             local b = mock_window(2, "b")
             State.windowList(1, "screen_a")[1] = { a }
@@ -30,8 +30,8 @@ describe("ScrollSpace.state", function()
 
             assert.are.equal(1, #State.windowList(1, "screen_a"))
             assert.are.equal(1, #State.windowList(1, "screen_b"))
-            assert.are.equal("screen_a", State.windowIndex(a).screen)
-            assert.are.equal("screen_b", State.windowIndex(b).screen)
+            assert.are.equal("screen_a", State.windowIndex(a).strip)
+            assert.are.equal("screen_b", State.windowIndex(b).strip)
         end)
     end)
 
@@ -62,25 +62,76 @@ describe("ScrollSpace.state", function()
         end)
     end)
 
-    describe("reconcileScreens", function()
-        it("merges a disconnected screen's columns onto the primary", function()
+    describe("reconcileStrips", function()
+        ---two displays stacked vertically: genuinely separate strips, so
+        ---each keeps its own bucket until the arrangement changes
+        local function stacked()
+            Mocks.set_screens({
+                { uuid = "screen_a", x = 0, y = 0, h = 800 },
+                { uuid = "screen_b", x = 0, y = 800, h = 800 },
+            })
+        end
+
+        it("merges a strip whose display is gone onto the primary's", function()
+            stacked()
             local a = mock_window(1, "a")
             local b = mock_window(2, "b")
             State.windowList(1, "screen_a")[1] = { a }
             State.windowList(1, "screen_b")[1] = { b }
 
-            Mocks.connected = { "screen_a" } -- screen_b unplugged
-            assert.is_true(State.reconcileScreens())
+            Mocks.set_screens({ { uuid = "screen_a", x = 0, y = 0, h = 800 } })
+            assert.is_true(State.reconcileStrips())
 
             assert.are.equal(2, #State.windowList(1, "screen_a"))
             assert.is_nil(State.windowList(1)["screen_b"])
-            assert.are.equal("screen_a", State.windowIndex(b).screen)
+            assert.are.equal("screen_a", State.windowIndex(b).strip)
         end)
 
-        it("reports no change when every screen is still connected", function()
+        it("reports no change when the arrangement is unchanged", function()
+            stacked()
             local a = mock_window(1, "a")
             State.windowList(1, "screen_a")[1] = { a }
-            assert.is_false(State.reconcileScreens())
+            assert.is_false(State.reconcileStrips())
+        end)
+
+        it("merges two strips that have become one side-by-side run", function()
+            -- the displays start stacked (two strips), then get rearranged
+            -- side by side, which makes them a single strip keyed by the
+            -- leftmost. Leaving them as two buckets would tile two
+            -- overlapping strips across the same pair of displays.
+            stacked()
+            local a = mock_window(1, "a")
+            local b = mock_window(2, "b")
+            State.windowList(1, "screen_a")[1] = { a }
+            State.windowList(1, "screen_b")[1] = { b }
+
+            Mocks.set_screens({
+                { uuid = "screen_a", x = 0, w = 1000 },
+                { uuid = "screen_b", x = 1000, w = 1000 },
+            })
+            assert.is_true(State.reconcileStrips())
+
+            assert.are.equal(2, #State.windowList(1, "screen_a"))
+            assert.is_nil(State.windowList(1)["screen_b"])
+            assert.are.equal("screen_a", State.windowIndex(b).strip)
+        end)
+
+        it("re-keys a strip when a display is plugged in to its left", function()
+            -- the strip key is its leftmost display, so a newcomer on the
+            -- left takes over the key and the existing bucket has to
+            -- migrate onto it
+            Mocks.set_screens({ { uuid = "screen_a", x = 0, w = 1000 } })
+            local a = mock_window(1, "a")
+            State.windowList(1, "screen_a")[1] = { a }
+
+            Mocks.set_screens({
+                { uuid = "newcomer", x = -1000, w = 1000 },
+                { uuid = "screen_a", x = 0, w = 1000 },
+            })
+            assert.is_true(State.reconcileStrips())
+
+            assert.are.equal("newcomer", State.windowIndex(a).strip)
+            assert.is_nil(State.windowList(1)["screen_a"])
         end)
     end)
 
@@ -125,16 +176,23 @@ describe("ScrollSpace.state", function()
             assert.are.equal(1, State.windowIndex(b).col)
         end)
 
-        it("merges a screen that isn't connected any more onto the primary", function()
+        it("merges a strip that isn't connected any more onto the primary", function()
+            -- stacked, so screen_b is genuinely its own strip rather than
+            -- sharing screen_a's
+            Mocks.set_screens({
+                { uuid = "screen_a", x = 0, y = 0, h = 800 },
+                { uuid = "screen_b", x = 0, y = 800, h = 800 },
+            })
             local win = mock_window(1, "a", nil, { screen = "screen_b" })
             Windows.addWindow(win, 1)
+            assert.are.equal("screen_b", State.windowIndex(win).strip)
             State.save()
 
             State.clear()
-            Mocks.connected = { "screen_a" }
+            Mocks.set_screens({ { uuid = "screen_a", x = 0, y = 0, h = 800 } })
             State.load()
 
-            assert.are.equal("screen_a", State.windowIndex(win).screen)
+            assert.are.equal("screen_a", State.windowIndex(win).strip)
         end)
     end)
 end)
