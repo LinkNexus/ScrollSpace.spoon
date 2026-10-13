@@ -15,6 +15,10 @@ State.last_focused = {} -- dictionary of window id with workspace id for keys
 State.scratchpad = nil ---@type number|nil window id, lives outside window_list/index_table entirely
 State.current_workspace = nil ---@type number
 State.prev_focused_window = nil ---@type Window|nil
+---timestamp of the last follow-to-own-workspace, for events.lua's loop
+---breaker. Not persisted: it only guards against a burst of events within
+---a second or so, which cannot span a reload.
+State.last_follow_at = -math.huge ---@type number
 
 ---initialize module with reference to ScrollSpace
 ---@param scrollspace ScrollSpace
@@ -34,6 +38,7 @@ function State.clear()
     State.scratchpad = nil
     State.current_workspace = State.ScrollSpace.default_workspace
     State.prev_focused_window = nil
+    State.last_follow_at = -math.huge
 end
 
 ---walk through all tiled windows in a workspace (across every strip) and

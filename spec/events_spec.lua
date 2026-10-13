@@ -4,8 +4,8 @@ package.preload["spec_helper"] = function() return dofile("spec/spec_helper.lua"
 
 describe("ScrollSpace.events", function()
     local H = require("spec_helper")
-    local Events, Windows, State, Floating, Mocks =
-        H.Events, H.Windows, H.State, H.Floating, H.Mocks
+    local Events, Windows, State, Floating, Workspace, Mocks =
+        H.Events, H.Windows, H.State, H.Floating, H.Workspace, H.Mocks
     local mock_window = Mocks.mock_window
 
     local function fire(window, event) Events.windowEventHandler(window, event, H.scrollspace) end
@@ -69,6 +69,141 @@ describe("ScrollSpace.events", function()
             fire(win, "windowVisible")
             assert.are.equal(col, State.windowIndex(win).col)
             assert.are.equal(1, #State.windowList(1, "screen_a"))
+        end)
+
+        -- clicking a link in another app, or a Dock icon, makes macOS
+        -- unminimize AND focus in one go, and the window_filter can drop
+        -- the focus event (it carries `visible = true`, and the window is
+        -- still minimized at that instant) -- leaving windowVisible as the
+        -- only event that arrives. Without handling it here the window
+        -- just sat on top of the active workspace's strip while still
+        -- belonging to its own.
+        it("follows an externally surfaced window to its own workspace", function()
+            State.current_workspace = 3
+            local zen = mock_window(1, "Zen")
+            local discord = mock_window(2, "Discord")
+            Windows.addWindow(zen, 1)
+            Windows.addWindow(discord, 3)
+            assert.is_true(zen:isMinimized())
+
+            zen:unminimize() -- what the URL handler itself does
+            fire(zen, "windowVisible")
+
+            assert.are.equal(1, State.current_workspace)
+            assert.are.equal(1, State.windowIndex(zen).workspace)
+            assert.is_false(zen:isMinimized())
+            assert.is_true(discord:isMinimized())
+            assert.are.equal(zen, Mocks.focused_window)
+        end)
+
+        it("does not follow a window an app restored in the background", function()
+            -- the regression this guard exists for: `darwin-rebuild switch`
+            -- relaunches apps, each restored window lands on its rule's
+            -- workspace, addWindow() minimizes the ones that aren't
+            -- current, and the apps then re-show them as they finish
+            -- starting up. Following those turned the burst into a
+            -- continuous workspace ping-pong that never settled.
+            State.current_workspace = 3
+            local background = mock_window(1, "restoring", nil, { background = true })
+            local here = mock_window(2, "Discord")
+            Windows.addWindow(background, 1)
+            Windows.addWindow(here, 3)
+
+            background:unminimize() -- the app restoring its own window
+            fire(background, "windowVisible")
+
+            assert.are.equal(3, State.current_workspace)
+            assert.is_false(here:isMinimized())
+        end)
+
+        it("drops a second follow inside the cooldown", function()
+            -- hard loop breaker: even if two windows on two workspaces are
+            -- both being re-surfaced, only one switch gets through, so the
+            -- two can't ping-pong off each other indefinitely
+            State.current_workspace = 3
+            local a = mock_window(1, "a")
+            local b = mock_window(2, "b")
+            local c = mock_window(3, "c")
+            Windows.addWindow(a, 1)
+            Windows.addWindow(b, 2)
+            Windows.addWindow(c, 3)
+
+            a:unminimize()
+            fire(a, "windowVisible")
+            assert.are.equal(1, State.current_workspace) -- first follow lands
+
+            b:unminimize()
+            fire(b, "windowVisible")
+            assert.are.equal(1, State.current_workspace) -- second is dropped
+        end)
+
+        it("allows another follow once the cooldown has passed", function()
+            State.current_workspace = 3
+            local a = mock_window(1, "a")
+            local b = mock_window(2, "b")
+            Windows.addWindow(a, 1)
+            Windows.addWindow(b, 2)
+
+            a:unminimize()
+            fire(a, "windowVisible")
+            assert.are.equal(1, State.current_workspace)
+
+            Mocks.now = Mocks.now + 2 -- past FOLLOW_COOLDOWN
+            b:unminimize()
+            fire(b, "windowVisible")
+            assert.are.equal(2, State.current_workspace)
+        end)
+
+        it("does not follow its own unminimize during a workspace switch", function()
+            -- switchWorkspace sets current_workspace to the target BEFORE
+            -- unminimizing, which is exactly what makes the check above
+            -- safe: everything the Spoon surfaces itself already matches
+            State.current_workspace = 3
+            local a = mock_window(1, "a")
+            local b = mock_window(2, "b")
+            Windows.addWindow(a, 1)
+            Windows.addWindow(b, 3)
+
+            Workspace.switchWorkspace(1)
+            assert.are.equal(1, State.current_workspace)
+
+            fire(a, "windowVisible") -- the event our own unminimize produced
+            assert.are.equal(1, State.current_workspace)
+        end)
+    end)
+
+    describe("floating windows", function()
+        it("follows an externally surfaced floating window to its workspace", function()
+            -- a floating window is excluded from tiling math but is still
+            -- a workspace member, so it has the same overlay problem
+            State.current_workspace = 3
+            local floater = mock_window(1, "floater")
+            Windows.addWindow(floater, 1)
+            Mocks.focused_window = floater
+            Floating.toggleFloating(floater)
+            assert.are.equal(1, State.is_floating[1])
+
+            State.current_workspace = 3
+            floater:minimize()
+            floater:unminimize() -- what the Dock click itself does
+            fire(floater, "windowVisible")
+
+            assert.are.equal(1, State.current_workspace)
+            assert.are.equal(1, State.is_floating[1])
+            assert.is_false(floater:isMinimized())
+        end)
+
+        it("still ignores its own minimize during a workspace switch", function()
+            State.current_workspace = 1
+            local floater = mock_window(1, "floater")
+            Windows.addWindow(floater, 1)
+            Mocks.focused_window = floater
+            Floating.toggleFloating(floater)
+
+            fire(floater, "windowNotVisible")
+
+            assert.are.equal(1, State.current_workspace)
+            assert.are.equal(1, State.is_floating[1])
         end)
     end)
 

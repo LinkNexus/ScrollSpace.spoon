@@ -314,6 +314,64 @@ busted spec/
 - `windowVisible`: only call `addWindow()` if the window isn't already in
   `index_table` (guards against our own `unminimize()` calls re-triggering
   this).
+- **Following externally surfaced windows.** Something outside ScrollSpace
+  — a Dock icon, a notification, cmd-tab, `open -a`, a URL handler
+  (clicking a link in one app that opens in a browser on another
+  workspace) — can surface a window belonging to an inactive workspace.
+  macOS just unminimizes it in place, so it lands on top of the active
+  workspace's strip: a stray window overlaying a layout it isn't part of,
+  still indexed to its own workspace, with nothing re-minimizing it until
+  the next manual switch. Both `windowFocused` *and* `windowVisible`
+  follow the window to its own workspace instead.
+
+  Handling both is deliberate, because the two events are **not reliably
+  ordered**. When macOS unminimizes and focuses in one go, the focus event
+  can be delivered while the window is still minimized, at which point the
+  `window_filter`'s `visible = true` drops it — leaving `windowVisible` as
+  the only event that arrives. Following from both makes it
+  order-independent; whichever arrives second finds `current_workspace`
+  already matching and falls through to a plain retile.
+
+  The discriminator in `windowVisible` is `index.workspace ~=
+  current_workspace`. That is safe precisely because `switchWorkspace()`
+  assigns `current_workspace = n` *before* `show_workspace(n)`
+  unminimizes, so anything the Spoon surfaces itself always has
+  `index.workspace == current_workspace`. A tracked window surfacing while
+  its workspace is *not* current can therefore only have come from
+  outside.
+
+  `last_focused[workspace]` is set before switching, since
+  `switchWorkspace()` focuses the target's `last_focused` window — so the
+  switch lands on the window that was actually surfaced rather than
+  whatever was last used there.
+
+  This covers floating windows too: `is_floating` stores a workspace id
+  rather than a boolean, so a floating window is a workspace member with
+  the same overlay problem. Its branch returns early from everything else,
+  but not from the follow. The scratchpad is deliberately exempt — it is
+  global by design and belongs to no workspace.
+
+  **Two guards, both load-bearing.** Following from `windowVisible`
+  without them caused a continuous minimize/unminimize storm on
+  `darwin-rebuild switch`:
+  1. `surfaced_by_user(window)` — the window is focused, or its app is
+     frontmost. `windowFocused` got this signal for free (a focused
+     window's app is frontmost by definition); `windowVisible` fires for
+     background windows too and has to ask. A rebuild relaunches apps,
+     every restored window lands on its rule's workspace, `addWindow()`
+     minimizes the ones that aren't current, and the apps then re-show
+     them as they finish starting up — following *those* is what turned
+     the burst into an endless workspace ping-pong. A window merely
+     restored in the background is now left where it is: it overlays
+     until the next switch, which is what happened before following
+     existed at all, and is vastly preferable to a storm.
+  2. `FOLLOW_COOLDOWN` (1s, against `State.last_follow_at`) — a hard loop
+     breaker independent of the cause. Since `switchWorkspace()` minimizes
+     a whole workspace and unminimizes another, any follow can provoke the
+     next; dropping follows that arrive inside the cooldown bounds the
+     damage to one switch however bad the event storm is. It lives on
+     `State` rather than as a module local so `State.clear()` resets it
+     with the rest of the runtime bookkeeping.
 - `windowNotVisible`: do **not** remove the window from `window_list` here
   — this fires for our own `minimize()` calls during a workspace switch,
   and removing it would defeat the whole point of this design. Only

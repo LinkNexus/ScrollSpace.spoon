@@ -85,7 +85,7 @@ end
 ---@param id number
 ---@param title string
 ---@param frame table|nil
----@param opts table|nil { app = string, screen = string, minimized = boolean, subrole = string }
+---@param opts table|nil { app, screen, minimized, subrole, background }
 function M.mock_window(id, title, frame, opts)
     opts = opts or {}
     frame = frame or { x = 0, y = 0, w = 100, h = 100 }
@@ -106,6 +106,11 @@ function M.mock_window(id, title, frame, opts)
             return {
                 name = function() return app_name end,
                 bundleID = function() return "com.example." .. app_name end,
+                -- defaults true: the common case for these specs is a
+                -- window surfacing because the user asked for it. Set
+                -- opts.background for an app restoring its own window
+                -- behind the user's back.
+                isFrontmost = function() return not opts.background end,
             }
         end,
         tabCount = function() return 0 end,
@@ -188,6 +193,9 @@ function M.init_mocks()
     M.windows = {}
     M.focused_window = nil
     M.focus_order = {}
+    -- advanced by specs that need two events to fall outside the follow
+    -- cooldown in events.lua
+    M.now = 0
     M.screens = {
         screen_a = M.mock_screen("screen_a", 0),
         screen_b = M.mock_screen("screen_b", 1000),
@@ -274,7 +282,7 @@ function M.init_mocks()
             end,
         },
         timer = {
-            secondsSinceEpoch = function() return 0 end,
+            secondsSinceEpoch = function() return M.now end,
             doUntil = function(c, _, _) c() end,
             doAfter = function(_, fn) fn() end,
         },

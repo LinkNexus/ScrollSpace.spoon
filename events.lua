@@ -40,6 +40,59 @@ local app_watcher = hs.application.watcher.new(function(_, event)
     end
 end)
 
+---minimum gap between two follows. A hard loop breaker, not a nicety:
+---switchWorkspace() minimizes a whole workspace and unminimizes another,
+---so if anything re-surfaces a window that was just minimized, each
+---follow can provoke the next one and the two workspaces ping-pong
+---indefinitely. Confirmed live: a `darwin-rebuild switch` relaunches
+---apps, every restored window lands on its rule's workspace, addWindow()
+---minimizes the ones that aren't current, the apps re-show them as they
+---finish starting up, and the result was a continuous minimize/unminimize
+---storm that never settled. Dropping follows that arrive inside this
+---window bounds the damage to one switch however bad the event storm is.
+---Lives on State rather than as a local here so State.clear() resets it
+---with the rest of the runtime bookkeeping.
+local FOLLOW_COOLDOWN <const> = 1.0
+
+---whether a window surfacing can be attributed to the user asking for it,
+---as opposed to an app restoring or recreating its own window in the
+---background. This is the signal windowFocused got for free -- a focused
+---window's app is frontmost by definition -- and that windowVisible has
+---to ask for explicitly, since it fires for background windows too.
+---@param window Window
+---@return boolean
+local function surfaced_by_user(window)
+    if Window.focusedWindow() == window then return true end
+    local app = window:application()
+    return app ~= nil and app:isFrontmost()
+end
+
+---follow a window that surfaced from outside ScrollSpace to its own
+---workspace, rather than letting it sit on top of a strip it isn't part
+---of. Shared by the windowFocused and windowVisible branches below.
+---
+---last_focused is set before the switch on purpose: switchWorkspace()
+---focuses the target workspace's last_focused window, so recording this
+---one first makes it land back on exactly the window that surfaced
+---rather than whatever was focused there before.
+---@param self ScrollSpace
+---@param window Window
+---@param workspace number the workspace the window belongs to
+---@return boolean whether the switch actually happened
+local function follow_to_own_workspace(self, window, workspace)
+    local now = Timer.secondsSinceEpoch()
+    if now - self.state.last_follow_at < FOLLOW_COOLDOWN then
+        self.logger.df("not following to workspace %d: within follow cooldown", workspace)
+        return false
+    end
+    self.state.last_follow_at = now
+
+    self.state.last_focused[workspace] = window:id()
+    self.logger.df("following externally surfaced window to workspace %d", workspace)
+    self.workspace.switchWorkspace(workspace)
+    return true
+end
+
 ---callback for window events
 ---@param window Window
 ---@param event string name of the event
@@ -63,15 +116,31 @@ function Events.windowEventHandler(window, event, self)
         return
     end
 
-    -- floating windows: only destruction is meaningful. Their
-    -- windowVisible/windowNotVisible events fire from our own
-    -- minimize()/unminimize() during a workspace switch and shouldn't
-    -- touch tiling state
+    -- floating windows: destruction and being surfaced from outside are
+    -- the only meaningful events. Their windowVisible/windowNotVisible
+    -- otherwise fire from our own minimize()/unminimize() during a
+    -- workspace switch and shouldn't touch tiling state -- they're
+    -- excluded from tiling math entirely.
     if self.floating.isFloating(window) then
         if event == "windowDestroyed" then
             self.floating.removeFloating(window)
             self.state.uiWatcherDelete(window:id())
             self.state.save()
+            return
+        end
+
+        -- a floating window is still a workspace member (is_floating
+        -- stores the workspace id, not just a boolean), so the same
+        -- external-surface problem applies to it: a Dock click or URL
+        -- handler can unminimize and focus one belonging to an inactive
+        -- workspace, leaving it on top of a strip it isn't part of.
+        -- Same both-events reasoning as the tiled path below.
+        local floating_workspace = self.state.is_floating[window:id()]
+        if (event == "windowFocused" or event == "windowVisible")
+            and floating_workspace
+            and floating_workspace ~= self.state.current_workspace
+            and surfaced_by_user(window) then
+            follow_to_own_workspace(self, window, floating_workspace)
         end
         return
     end
@@ -99,18 +168,17 @@ function Events.windowEventHandler(window, event, self)
             -- workspace's strip: one stray window overlaying a layout it
             -- isn't part of, and nothing re-minimizes it until the next
             -- manual switch. Follow the window to its own workspace
-            -- instead.
+            -- instead. windowVisible below does the same, because the two
+            -- events are not reliably ordered -- see the note there.
             --
             -- Re-entrancy is safe. The minimize()/unminimize() storm this
             -- kicks off re-enters this handler as windowNotVisible (a
-            -- no-op branch) and windowVisible (early-returns for windows
-            -- already in index_table, which all of these are), and
-            -- switchWorkspace's closing focus() call re-enters as
-            -- windowFocused for `window`, which the prev_focused_window
-            -- guard above has already claimed.
+            -- no-op branch) and windowVisible (which early-returns once
+            -- current_workspace matches), and switchWorkspace's closing
+            -- focus() call re-enters as windowFocused for `window`, which
+            -- the prev_focused_window guard above has already claimed.
             if index.workspace ~= self.state.current_workspace then
-                self.logger.df("following externally focused window to workspace %d", index.workspace)
-                self.workspace.switchWorkspace(index.workspace)
+                follow_to_own_workspace(self, window, index.workspace)
             end
 
             -- falls through to the tileWorkspace() at the bottom with this
@@ -120,9 +188,39 @@ function Events.windowEventHandler(window, event, self)
             workspace, anchor_window = index.workspace, window
         end
     elseif event == "windowVisible" or event == "windowUnfullscreened" then
-        if self.state.windowIndex(window) then
-            -- already tracked: our own unminimize() during a workspace
-            -- switch re-triggered this event, not a genuinely new window
+        local index = self.state.windowIndex(window)
+        if index then
+            -- already tracked, so this is not a genuinely new window.
+            -- Usually it's our own unminimize() during a workspace switch,
+            -- which is a no-op here -- but not always.
+            --
+            -- switchWorkspace() sets current_workspace to the target
+            -- BEFORE unminimizing it, so anything we surface ourselves
+            -- always has index.workspace == current_workspace. A tracked
+            -- window surfacing while its workspace is NOT current can
+            -- therefore only have been unminimized from outside
+            -- ScrollSpace, which is exactly the overlay case: follow it.
+            --
+            -- windowFocused does this too, but the two events are not
+            -- reliably ordered. When macOS unminimizes and focuses in one
+            -- go (clicking a link in another app, a Dock icon), the filter
+            -- can deliver the focus event while the window is still
+            -- minimized, and `visible = true` on the window_filter drops
+            -- it -- leaving windowVisible as the only event that arrives.
+            -- Handling both makes the follow order-independent; whichever
+            -- arrives second finds current_workspace already matching and
+            -- falls through to the plain retile.
+            -- gated on surfaced_by_user: windowVisible fires for
+            -- background windows too, and following those is what turned
+            -- an app-launch burst into an endless workspace ping-pong.
+            -- A window an app merely restored in the background is left
+            -- where it is -- it overlays until the next switch, which is
+            -- the behaviour that predates following at all, and is vastly
+            -- preferable to a storm.
+            if index.workspace ~= self.state.current_workspace
+                and surfaced_by_user(window) then
+                follow_to_own_workspace(self, window, index.workspace)
+            end
             return
         end
         workspace, anchor_window = self.windows.addWindow(window), window
